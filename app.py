@@ -69,6 +69,18 @@ def init_session_state():
         st.session_state.progetti_ingested = False
 
 
+def _show_analysis_error(error: Exception) -> None:
+    """Mostra un messaggio d'errore chiaro e orientato all'azione."""
+    error_text = str(error)
+
+    if "insufficient_quota" in error_text or "You exceeded your current quota" in error_text:
+        st.error("❌ Credito API esaurito: ricarica/abilita billing su OpenAI e riprova.")
+        return
+
+    st.error(f"❌ Errore durante l'analisi: {error_text}")
+    st.exception(error)
+
+
 def sidebar():
     """Sidebar con configurazione"""
     st.sidebar.title("⚙️ Configurazione")
@@ -203,8 +215,7 @@ def tab_analisi():
                     st.success("✅ Analisi completata!")
                     
                 except Exception as e:
-                    st.error(f"❌ Errore durante l'analisi: {str(e)}")
-                    st.exception(e)
+                    _show_analysis_error(e)
     
     # Mostra risultati se disponibili
     if st.session_state.analisi_risultati:

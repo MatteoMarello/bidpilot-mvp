@@ -15,11 +15,19 @@ class BandoAnalyzer:
     """Analizza bando e verifica match con profilo aziendale"""
     
     def __init__(self, openai_api_key: str, profilo_path: str = "config/profilo_azienda.json"):
-        self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0,
-            api_key=openai_api_key
-        )
+        try:
+            self.llm = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0,
+                api_key=openai_api_key
+            )
+        except Exception as e:
+            if "unexpected keyword argument 'proxies'" in str(e):
+                raise RuntimeError(
+                    "Incompatibilità tra pacchetti OpenAI/LangChain rilevata: non è un errore di credito API. "
+                    "Allinea le dipendenze eseguendo: pip install -r requirements.txt --upgrade --force-reinstall"
+                ) from e
+            raise
         
         # Carica profilo aziendale
         with open(profilo_path, 'r', encoding='utf-8') as f:
@@ -119,25 +127,42 @@ class BandoAnalyzer:
     
     def _verifica_certificazione(self, cert_richiesta: str) -> Dict:
         """Verifica se azienda possiede certificazione"""
-        cert_possedute = [c["tipo"] for c in self.profilo_azienda.get("certificazioni", [])]
+        cert_richiesta_norm = (cert_richiesta or "").strip()
+        if not cert_richiesta_norm:
+            return {
+                "status": "GIALLO",
+                "motivo": "Certificazione non specificata nel bando"
+            }
+
+        cert_possedute = [
+            (c.get("tipo") or "").strip()
+            for c in self.profilo_azienda.get("certificazioni", [])
+            if isinstance(c, dict)
+        ]
         
         # Match esatto o parziale
         for cert in cert_possedute:
-            if cert.lower() in cert_richiesta.lower() or cert_richiesta.lower() in cert.lower():
-                cert_data = next((c for c in self.profilo_azienda["certificazioni"] if c["tipo"] == cert), None)
+            if not cert:
+                continue
+            if cert.lower() in cert_richiesta_norm.lower() or cert_richiesta_norm.lower() in cert.lower():
+                cert_data = next(
+                    (c for c in self.profilo_azienda["certificazioni"] if c.get("tipo") == cert),
+                    None
+                )
+                data_rilascio = cert_data.get("data_rilascio", "data non disponibile") if cert_data else "data non disponibile"
                 return {
                     "status": "VERDE",
-                    "motivo": f"{cert} presente (rinnovata {cert_data['data_rilascio']})"
+                    "motivo": f"{cert} presente (rinnovata {data_rilascio})"
                 }
         
         return {
             "status": "GIALLO",
-            "motivo": f"{cert_richiesta} - Verificare con fornitore o richiedere certificazione"
+            "motivo": f"{cert_richiesta_norm} - Verificare con fornitore o richiedere certificazione"
         }
     
     def _verifica_figura_professionale(self, figura: Dict) -> Dict:
         """Verifica disponibilità figura professionale"""
-        ruolo = figura.get("ruolo", "")
+        ruolo = (figura.get("ruolo") or "").strip()
         
         # Verifica se è interno
         if ruolo in self.profilo_azienda.get("figure_professionali_interne", []):
