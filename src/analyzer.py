@@ -15,11 +15,19 @@ class BandoAnalyzer:
     """Analizza bando e verifica match con profilo aziendale"""
     
     def __init__(self, openai_api_key: str, profilo_path: str = "config/profilo_azienda.json"):
-        self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0,
-            api_key=openai_api_key
-        )
+        try:
+            self.llm = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0,
+                api_key=openai_api_key
+            )
+        except Exception as e:
+            if "unexpected keyword argument 'proxies'" in str(e):
+                raise RuntimeError(
+                    "Incompatibilità tra pacchetti OpenAI/LangChain rilevata: non è un errore di credito API. "
+                    "Allinea le dipendenze eseguendo: pip install -r requirements.txt --upgrade --force-reinstall"
+                ) from e
+            raise
         
         # Carica profilo aziendale
         with open(profilo_path, 'r', encoding='utf-8') as f:
