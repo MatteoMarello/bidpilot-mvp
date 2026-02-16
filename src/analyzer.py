@@ -1,18 +1,32 @@
 """
-Analyzer per analisi Go/No-Go del bando
-Estrae requisiti e li confronta con profilo aziendale
+Analyzer per analisi Go/No-Go del bando - VERSIONE MIGLIORATA
+Con matching puntuale, check geografico, gap SOA, suggerimenti avvalimento
 """
 import json
 from datetime import datetime, timedelta
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
 
-from src.prompts import EXTRACTION_PROMPT, MATCH_ANALYSIS_PROMPT
+# Import dal file prompts
+# from src.prompts import EXTRACTION_PROMPT  # Verrà importato quando file sarà sostituito
+
+
+# Mapping classifiche SOA -> importo massimo
+CLASSIFICHE_SOA_IMPORTO = {
+    "I": 258000,
+    "II": 516000,
+    "III": 1033000,
+    "IV": 2065000,
+    "V": 3098000,
+    "VI": 5165000,
+    "VII": 10329000,
+    "VIII": float('inf')  # Illimitato
+}
 
 
 class BandoAnalyzer:
-    """Analizza bando e verifica match con profilo aziendale"""
+    """Analizza bando e verifica match con profilo aziendale - VERSIONE MIGLIORATA"""
     
     def __init__(self, openai_api_key: str, profilo_path: str = "config/profilo_azienda.json"):
         try:
@@ -24,8 +38,8 @@ class BandoAnalyzer:
         except Exception as e:
             if "unexpected keyword argument 'proxies'" in str(e):
                 raise RuntimeError(
-                    "Incompatibilità tra pacchetti OpenAI/LangChain rilevata: non è un errore di credito API. "
-                    "Allinea le dipendenze eseguendo: pip install -r requirements.txt --upgrade --force-reinstall"
+                    "Incompatibilità tra pacchetti OpenAI/LangChain rilevata. "
+                    "Allinea le dipendenze: pip install -r requirements.txt --upgrade --force-reinstall"
                 ) from e
             raise
         
@@ -33,31 +47,31 @@ class BandoAnalyzer:
         with open(profilo_path, 'r', encoding='utf-8') as f:
             self.profilo_azienda = json.load(f)
     
-    def extract_requirements(self, bando_text: str) -> Dict[str, Any]:
+    def extract_requirements(self, bando_text: str, extraction_prompt: str) -> Dict[str, Any]:
         """
         Estrae requisiti strutturati dal testo del bando
         
         Args:
             bando_text: testo completo del bando
+            extraction_prompt: template prompt per extraction
             
         Returns:
             dizionario con requisiti estratti
         """
         prompt = PromptTemplate(
-            template=EXTRACTION_PROMPT,
+            template=extraction_prompt,
             input_variables=["bando_text"]
         )
         
         chain = prompt | self.llm
         
-        # Limita il testo se troppo lungo (max ~12k caratteri per evitare overflow)
-        if len(bando_text) > 12000:
-            bando_text = bando_text[:12000] + "\n\n[...testo troncato...]"
+        # Limita il testo se troppo lungo
+        if len(bando_text) > 15000:
+            bando_text = bando_text[:15000] + "\n\n[...testo troncato per lunghezza...]"
         
         response = chain.invoke({"bando_text": bando_text})
         
         try:
-            # Estrai JSON dalla risposta
             content = response.content
             
             # Rimuovi markdown se presente
@@ -70,15 +84,14 @@ class BandoAnalyzer:
             return requisiti
             
         except json.JSONDecodeError as e:
-            raise Exception(f"Errore nel parsing del JSON estratto: {str(e)}\nRisposta LLM: {response.content}")
+            raise Exception(f"Errore parsing JSON estratto: {str(e)}\nRisposta LLM: {response.content[:500]}")
     
-    def _calcola_urgenza_scadenza(self, data_str: str) -> tuple:
+    def _calcola_urgenza_scadenza(self, data_str: str) -> Tuple[str, int, str]:
         """
         Calcola urgenza di una scadenza
         
         Returns:
             (livello, giorni_mancanti, emoji)
-            livello: 'CRITICO' | 'ATTENZIONE' | 'OK'
         """
         try:
             data_scadenza = datetime.strptime(data_str, "%Y-%m-%d")
@@ -87,6 +100,8 @@ class BandoAnalyzer:
             
             if giorni < 0:
                 return "SCADUTO", giorni, "⛔"
+            elif giorni == 0:
+                return "CRITICO", 0, "🔴"
             elif giorni <= 2:
                 return "CRITICO", giorni, "🔴"
             elif giorni <= 7:
@@ -97,32 +112,115 @@ class BandoAnalyzer:
         except:
             return "SCONOSCIUTO", None, "❓"
     
+    def _check_geografico(self, comune_bando: str, provincia_bando: str, regione_bando: str) -> Dict:
+        """
+        Verifica se il bando è nella zona geografica abituale dell'azienda
+        
+        Returns:
+            {"in_zona": bool, "motivo": str, "warning": bool}
+        """
+        aree_abituali = self.profilo_azienda.get("aree_geografiche", [])
+        
+        # Normalizza input
+        comune_norm = (comune_bando or "").strip().lower()
+        provincia_norm = (provincia_bando or "").strip().upper()
+        regione_norm = (regione_bando or "").strip().title()
+        
+        if not aree_abituali:
+            # Nessuna area specificata = va bene tutto
+            return {
+                "in_zona": True,
+                "motivo": "Area geografiche non specificate nel profilo",
+                "warning": False
+            }
+        
+        # Check regione
+        for area in aree_abituali:
+            area_norm = area.strip().title()
+            
+            # Match esatto regione
+            if regione_norm and area_norm == regione_norm:
+                return {
+                    "in_zona": True,
+                    "motivo": f"Bando in {regione_norm}, area abituale dell'azienda",
+                    "warning": False
+                }
+            
+            # Match parziale (es: "Lombardia" in "Milano, Lombardia")
+            if regione_norm and regione_norm in area_norm:
+                return {
+                    "in_zona": True,
+                    "motivo": f"Bando in {regione_norm}, area abituale",
+                    "warning": False
+                }
+        
+        # Fuori zona
+        aree_str = ", ".join(aree_abituali)
+        return {
+            "in_zona": False,
+            "motivo": f"Bando in {regione_norm or comune_norm or 'località non specificata'} - Fuori dalle aree abituali ({aree_str})",
+            "warning": True
+        }
+    
+    def _calcola_gap_classifica(self, classifica_richiesta: str, classifica_posseduta: str) -> Dict:
+        """
+        Calcola gap monetario tra classifica posseduta e richiesta
+        
+        Returns:
+            {"gap_euro": int, "gap_descrizione": str}
+        """
+        importo_richiesto = CLASSIFICHE_SOA_IMPORTO.get(classifica_richiesta, 0)
+        importo_posseduto = CLASSIFICHE_SOA_IMPORTO.get(classifica_posseduta, 0)
+        
+        gap = importo_richiesto - importo_posseduto
+        
+        if gap > 0:
+            return {
+                "gap_euro": gap,
+                "gap_descrizione": f"Mancano €{gap:,} di classifica (posseduta {classifica_posseduta}, richiesta {classifica_richiesta})"
+            }
+        else:
+            return {
+                "gap_euro": 0,
+                "gap_descrizione": f"Classifica {classifica_posseduta} sufficiente (richiesta {classifica_richiesta})"
+            }
+    
     def _verifica_soa(self, soa_richiesta: Dict) -> Dict:
-        """Verifica se azienda possiede SOA richiesta"""
+        """Verifica se azienda possiede SOA richiesta - CON GAP CALCOLO"""
         categoria_richiesta = soa_richiesta.get("categoria", "")
         classifica_richiesta = soa_richiesta.get("classifica", "")
         
         for soa in self.profilo_azienda.get("soa_possedute", []):
             if soa["categoria"] == categoria_richiesta:
-                # Verifica anche classifica (III > II > I)
-                classifica_map = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5}
-                classifica_posseduta = classifica_map.get(soa["classifica"], 0)
-                classifica_richiesta_num = classifica_map.get(classifica_richiesta, 0)
+                classifica_posseduta = soa["classifica"]
                 
-                if classifica_posseduta >= classifica_richiesta_num:
+                # Verifica classifica (III > II > I)
+                classifica_map = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8}
+                num_posseduta = classifica_map.get(classifica_posseduta, 0)
+                num_richiesta = classifica_map.get(classifica_richiesta, 0)
+                
+                if num_posseduta >= num_richiesta:
                     return {
                         "status": "VERDE",
-                        "motivo": f"SOA {categoria_richiesta} Classifica {soa['classifica']} presente (scadenza {soa['scadenza']})"
+                        "motivo": f"SOA {categoria_richiesta} Classifica {classifica_posseduta} presente (scadenza {soa['scadenza']})",
+                        "gap": None
                     }
                 else:
+                    gap_info = self._calcola_gap_classifica(classifica_richiesta, classifica_posseduta)
                     return {
                         "status": "ROSSO",
-                        "motivo": f"SOA {categoria_richiesta} presente ma classifica insufficiente ({soa['classifica']} < {classifica_richiesta})"
+                        "motivo": f"SOA {categoria_richiesta} presente ma {gap_info['gap_descrizione']}",
+                        "gap": gap_info,
+                        "suggerimento": "Valutare AVVALIMENTO con impresa di classifica superiore"
                     }
         
+        # SOA non posseduta affatto
         return {
             "status": "ROSSO",
-            "motivo": f"SOA {categoria_richiesta} non posseduta"
+            "motivo": f"SOA {categoria_richiesta} Classifica {classifica_richiesta} NON posseduta",
+            "gap": {"gap_euro": CLASSIFICHE_SOA_IMPORTO.get(classifica_richiesta, 0), 
+                    "gap_descrizione": f"Categoria {categoria_richiesta} non presente in profilo"},
+            "suggerimento": "Ricorrere ad AVVALIMENTO con impresa che possiede la SOA richiesta"
         }
     
     def _verifica_certificazione(self, cert_richiesta: str) -> Dict:
@@ -149,6 +247,20 @@ class BandoAnalyzer:
                     (c for c in self.profilo_azienda["certificazioni"] if c.get("tipo") == cert),
                     None
                 )
+                
+                # Check scadenza certificazione
+                if cert_data:
+                    scadenza_cert = cert_data.get("scadenza", "")
+                    try:
+                        data_scad = datetime.strptime(scadenza_cert, "%Y-%m-%d")
+                        if data_scad < datetime.now():
+                            return {
+                                "status": "ROSSO",
+                                "motivo": f"{cert} SCADUTA il {scadenza_cert} - RINNOVARE URGENTEMENTE"
+                            }
+                    except:
+                        pass
+                
                 data_rilascio = cert_data.get("data_rilascio", "data non disponibile") if cert_data else "data non disponibile"
                 return {
                     "status": "VERDE",
@@ -157,7 +269,8 @@ class BandoAnalyzer:
         
         return {
             "status": "GIALLO",
-            "motivo": f"{cert_richiesta_norm} - Verificare con fornitore o richiedere certificazione"
+            "motivo": f"{cert_richiesta_norm} - Verificare con fornitore o richiedere certificazione",
+            "suggerimento": "Contattare ente certificatore per tempistiche rilascio"
         }
     
     def _verifica_figura_professionale(self, figura: Dict) -> Dict:
@@ -176,26 +289,108 @@ class BandoAnalyzer:
             if ruolo.lower() in collab["tipo"].lower():
                 return {
                     "status": "GIALLO",
-                    "motivo": f"{ruolo} - Contattare {collab['nome_studio']} (ultimo utilizzo: {collab['ultimo_utilizzo']}, costo medio: €{collab['costo_medio']})"
+                    "motivo": f"{ruolo} - Contattare {collab['nome_studio']} (ultimo utilizzo: {collab['ultimo_utilizzo']}, costo medio: €{collab['costo_medio']:,})",
+                    "costo_stimato": collab["costo_medio"]
                 }
         
         return {
             "status": "GIALLO",
-            "motivo": f"{ruolo} - Figura non in database. Verificare disponibilità consulenti esterni"
+            "motivo": f"{ruolo} - Figura non in database. Verificare disponibilità consulenti esterni",
+            "suggerimento": "Cercare professionista tramite ordini professionali o network aziendali"
         }
     
-    def analyze_bando(self, bando_text: str) -> Dict[str, Any]:
+    def _calcola_score_e_decisione(self, 
+                                    soa_analisi: Dict, 
+                                    cert_analisi: Dict, 
+                                    figure_analisi: Dict,
+                                    scadenze_analisi: Dict,
+                                    check_geo: Dict,
+                                    requisiti: Dict) -> Tuple[str, int, List[str]]:
         """
-        Analisi completa del bando con verifica requisiti
+        Calcola decisione finale e score con spiegazione WHY
+        
+        Returns:
+            (decisione, punteggio, motivi_list)
+        """
+        num_rossi = len(soa_analisi["rossi"]) + len(cert_analisi["rossi"]) + len(figure_analisi["rossi"])
+        num_gialli = len(soa_analisi["gialli"]) + len(cert_analisi["gialli"]) + len(figure_analisi["gialli"])
+        num_verdi = len(soa_analisi["verdi"]) + len(cert_analisi["verdi"]) + len(figure_analisi["verdi"])
+        
+        punteggio = 100  # Partiamo da 100
+        motivi = []
+        
+        # KILLER FACTORS (-80 punti ciascuno)
+        if num_rossi > 0:
+            punteggio -= num_rossi * 40
+            if soa_analisi["rossi"]:
+                soa_mancanti = [s["categoria"] for s in soa_analisi["rossi"]]
+                motivi.append(f"❌ SOA MANCANTI: {', '.join(soa_mancanti)} (-{len(soa_analisi['rossi'])*40}pt)")
+            if cert_analisi["rossi"]:
+                motivi.append(f"❌ Certificazioni scadute o critiche (-{len(cert_analisi['rossi'])*40}pt)")
+        
+        # Scadenze critiche (-20 punti ciascuna)
+        if scadenze_analisi["critiche"]:
+            num_critiche = len(scadenze_analisi["critiche"])
+            punteggio -= num_critiche * 20
+            motivi.append(f"🔴 {num_critiche} scadenza/e CRITICA/E entro 2 giorni (-{num_critiche*20}pt)")
+        
+        # Requisiti gialli (-10 punti ciascuno)
+        if num_gialli > 0:
+            punteggio -= num_gialli * 10
+            motivi.append(f"🟡 {num_gialli} requisiti DA VERIFICARE (-{num_gialli*10}pt)")
+        
+        # Fuori zona geografica (-15 punti)
+        if not check_geo["in_zona"]:
+            punteggio -= 15
+            motivi.append(f"🗺️ Bando FUORI ZONA abituale (-15pt)")
+        
+        # Importo fuori sweet spot (-10 punti)
+        importo_gara = requisiti.get("importo_lavori", 0)
+        sweet_spot = self.profilo_azienda.get("importi_gara", {}).get("sweet_spot", [0, 999999999])
+        if importo_gara > 0:
+            if importo_gara < sweet_spot[0] or importo_gara > sweet_spot[1]:
+                punteggio -= 10
+                motivi.append(f"💰 Importo €{importo_gara:,} fuori sweet spot (€{sweet_spot[0]:,}-€{sweet_spot[1]:,}) (-10pt)")
+        
+        # Bonus per requisiti verdi (+5 punti ciascuno, max +20)
+        bonus_verdi = min(20, num_verdi * 5)
+        if bonus_verdi > 0:
+            punteggio += bonus_verdi
+            motivi.append(f"✅ {num_verdi} requisiti POSSEDUTI (+{bonus_verdi}pt)")
+        
+        # Limita punteggio tra 0 e 100
+        punteggio = max(0, min(100, punteggio))
+        
+        # Decisione basata su punteggio
+        if punteggio < 40:
+            decisione = "NON PARTECIPARE"
+        elif punteggio < 65:
+            decisione = "PARTECIPARE CON CAUTELA"
+        else:
+            decisione = "PARTECIPARE"
+        
+        return decisione, punteggio, motivi
+    
+    def analyze_bando(self, bando_text: str, extraction_prompt: str) -> Dict[str, Any]:
+        """
+        Analisi completa del bando con verifica requisiti - VERSIONE MIGLIORATA
         
         Args:
             bando_text: testo completo del bando
+            extraction_prompt: prompt per estrazione (passato da fuori)
             
         Returns:
             dizionario con analisi completa e semafori
         """
         # Estrai requisiti
-        requisiti = self.extract_requirements(bando_text)
+        requisiti = self.extract_requirements(bando_text, extraction_prompt)
+        
+        # Check geografico
+        check_geo = self._check_geografico(
+            requisiti.get("comune_stazione_appaltante", ""),
+            requisiti.get("provincia_stazione_appaltante", ""),
+            requisiti.get("regione_stazione_appaltante", "")
+        )
         
         # Analizza scadenze
         scadenze_analisi = {
@@ -274,29 +469,25 @@ class BandoAnalyzer:
             else:
                 figure_analisi["rossi"].append(figura_info)
         
-        # Calcola decisione finale
+        # Calcola decisione finale CON MOTIVI
+        decisione, punteggio, motivi_score = self._calcola_score_e_decisione(
+            soa_analisi, cert_analisi, figure_analisi, scadenze_analisi, check_geo, requisiti
+        )
+        
         num_rossi = len(soa_analisi["rossi"]) + len(cert_analisi["rossi"]) + len(figure_analisi["rossi"])
         num_gialli = len(soa_analisi["gialli"]) + len(cert_analisi["gialli"]) + len(figure_analisi["gialli"])
         num_verdi = len(soa_analisi["verdi"]) + len(cert_analisi["verdi"]) + len(figure_analisi["verdi"])
         
-        if num_rossi > 0:
-            decisione = "NON PARTECIPARE"
-            punteggio = max(0, 40 - (num_rossi * 20))
-        elif num_gialli > 2:
-            decisione = "PARTECIPARE CON CAUTELA"
-            punteggio = 60 + (num_verdi * 2) - (num_gialli * 5)
-        else:
-            decisione = "PARTECIPARE"
-            punteggio = min(100, 75 + (num_verdi * 3) - (num_gialli * 5))
-        
         return {
             "requisiti_estratti": requisiti,
+            "check_geografico": check_geo,
             "scadenze": scadenze_analisi,
             "soa": soa_analisi,
             "certificazioni": cert_analisi,
             "figure_professionali": figure_analisi,
             "decisione": decisione,
             "punteggio_fattibilita": punteggio,
+            "motivi_punteggio": motivi_score,  # NUOVO: spiegazione score
             "num_requisiti": {
                 "verdi": num_verdi,
                 "gialli": num_gialli,

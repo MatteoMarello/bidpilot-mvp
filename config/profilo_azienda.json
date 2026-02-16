@@ -2,7 +2,13 @@
   "nome_azienda": "Ossola Impianti S.r.l.",
   "sede": "Torino, Italia",
   "settore_principale": "Impianti elettrici e fotovoltaici",
-  
+  "aree_geografiche": ["Piemonte", "Valle d'Aosta", "Lombardia"],
+  "importi_gara": {
+      "minimo_interesse": 50000,
+      "massimo_gestibile": 2000000,
+      "sweet_spot": [200000, 1000000]
+    },
+      
   "soa_possedute": [
     {
       "categoria": "OS6",
