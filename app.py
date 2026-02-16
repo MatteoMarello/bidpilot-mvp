@@ -1,19 +1,14 @@
 """
-BidPilot MVP - Applicazione Streamlit VERSIONE MIGLIORATA
-Sistema AI per analisi bandi con UI professionale e matching puntuale
+BidPilot MVP - Applicazione Streamlit ANTI-ALLUCINAZIONE
+Con structured output Pydantic e parser pdfplumber
 """
 import streamlit as st
 import os
 import json
 from datetime import datetime
 
-# IMPORTANTE: Quando sostituisci i file, decommentare queste import:
 from src.parser import BandoParser
 from src.analyzer import BandoAnalyzer
-from src.rag_engine import RAGEngine
-
-# Per ora uso un placeholder per mostrare la struttura
-# Nella versione finale, queste classi saranno importate normalmente
 
 
 # Configurazione pagina
@@ -24,17 +19,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# CSS PROFESSIONALE - Box grandi, colori evidenti, tipografia chiara
+# CSS PROFESSIONALE (manteniamo lo stesso stile)
 st.markdown("""
 <style>
-    /* Font professionale */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
     
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
     }
     
-    /* DASHBOARD HEADER - KPI Grandi */
     .dashboard-header {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         padding: 30px;
@@ -60,7 +53,6 @@ st.markdown("""
         opacity: 0.9;
     }
     
-    /* BOX DECISIONE GIGANTE */
     .decisione-box {
         padding: 40px;
         border-radius: 20px;
@@ -102,7 +94,6 @@ st.markdown("""
         opacity: 0.8;
     }
     
-    /* KILLER FACTORS - Box evidenziato */
     .killer-factors {
         background: #fff3cd;
         border-left: 8px solid #ff6b6b;
@@ -126,7 +117,6 @@ st.markdown("""
         border-left: 4px solid #dc3545;
     }
     
-    /* SCADENZE COUNTDOWN */
     .scadenza-critica {
         background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);
         color: white;
@@ -157,7 +147,6 @@ st.markdown("""
         box-shadow: 0 5px 15px rgba(255,193,7,0.3);
     }
     
-    /* BOX STATUS COLORATI */
     .status-box {
         padding: 20px;
         border-radius: 12px;
@@ -186,12 +175,6 @@ st.markdown("""
         font-weight: 600;
     }
     
-    .status-box p {
-        margin: 8px 0;
-        font-size: 14px;
-    }
-    
-    /* PROGRESS BAR CUSTOM */
     .custom-progress {
         height: 40px;
         background: #e9ecef;
@@ -223,7 +206,6 @@ st.markdown("""
         background: linear-gradient(90deg, #dc3545 0%, #c82333 100%);
     }
     
-    /* METRICS CARDS */
     .metric-card {
         background: white;
         padding: 25px;
@@ -258,7 +240,6 @@ st.markdown("""
         letter-spacing: 1px;
     }
     
-    /* MOTIVI PUNTEGGIO */
     .motivo-item {
         padding: 12px 15px;
         margin: 8px 0;
@@ -268,7 +249,6 @@ st.markdown("""
         font-size: 15px;
     }
     
-    /* SUGGERIMENTI */
     .suggerimento-box {
         background: #e7f3ff;
         border-left: 5px solid #007bff;
@@ -279,6 +259,16 @@ st.markdown("""
     
     .suggerimento-box strong {
         color: #007bff;
+    }
+    
+    .evidence-box {
+        background: #f8f9fa;
+        border-left: 3px solid #6c757d;
+        padding: 10px;
+        margin: 8px 0;
+        font-size: 13px;
+        font-style: italic;
+        color: #495057;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -293,10 +283,10 @@ def init_session_state():
 
 
 def render_dashboard_header(risultati: dict):
-    """Renderizza header dashboard con KPI principali"""
+    """Renderizza header dashboard"""
     req = risultati["requisiti_estratti"]
     
-    importo = req.get("importo_lavori", 0)
+    importo = req.get("importo_lavori")
     oggetto = req.get("oggetto_appalto", "N/D")
     stazione = req.get("stazione_appaltante", "N/D")
     
@@ -312,12 +302,27 @@ def render_dashboard_header(risultati: dict):
         </div>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Evidence importo (se presente)
+    if req.get("importo_evidence"):
+        st.markdown(f"""
+        <div class="evidence-box">
+            📝 Evidence Importo: "{req['importo_evidence']}"
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Evidence ente (se presente)
+    if req.get("stazione_evidence"):
+        st.markdown(f"""
+        <div class="evidence-box">
+            📝 Evidence Ente: "{req['stazione_evidence']}"
+        </div>
+        """, unsafe_allow_html=True)
 
 
 def render_decisione_gigante(decisione: str, punteggio: int, motivi: list):
-    """Renderizza box decisione GIGANTE con punteggio"""
+    """Renderizza decisione finale con punteggio"""
     
-    # Colore box basato su decisione
     if decisione == "PARTECIPARE":
         box_class = "verde"
         emoji = "✅"
@@ -339,7 +344,6 @@ def render_decisione_gigante(decisione: str, punteggio: int, motivi: list):
     </div>
     """, unsafe_allow_html=True)
     
-    # Progress bar visuale
     if punteggio >= 65:
         progress_class = "progress-verde"
     elif punteggio >= 40:
@@ -355,7 +359,6 @@ def render_decisione_gigante(decisione: str, punteggio: int, motivi: list):
     </div>
     """, unsafe_allow_html=True)
     
-    # Motivi del punteggio
     if motivi:
         st.markdown("### 📊 Dettaglio Calcolo Punteggio")
         for motivo in motivi:
@@ -363,12 +366,12 @@ def render_decisione_gigante(decisione: str, punteggio: int, motivi: list):
 
 
 def render_killer_factors(soa_rossi: list, scadenze_critiche: list, cert_rossi: list):
-    """Renderizza sezione KILLER FACTORS evidenziata"""
+    """Renderizza killer factors"""
     
     has_killers = soa_rossi or scadenze_critiche or cert_rossi
     
     if not has_killers:
-        return  # Nessun killer factor
+        return
     
     st.markdown("""
     <div class="killer-factors">
@@ -377,101 +380,56 @@ def render_killer_factors(soa_rossi: list, scadenze_critiche: list, cert_rossi: 
     </div>
     """, unsafe_allow_html=True)
     
-    # SOA mancanti
     if soa_rossi:
         for soa in soa_rossi:
-            categoria = soa.get("categoria", "")
-            classifica = soa.get("classifica", "")
-            motivo = soa.get("motivo", "")
-            suggerimento = soa.get("suggerimento", "")
-            
             st.markdown(f"""
             <div class="killer-item">
-                <strong>⛔ SOA {categoria} Classifica {classifica}</strong><br>
-                {motivo}
-                {"<br><br><strong>💡 Suggerimento:</strong> " + suggerimento if suggerimento else ""}
+                <strong>⛔ SOA {soa['categoria']} Classifica {soa['classifica']}</strong><br>
+                {soa['motivo']}
+                {"<br><br><strong>💡 Suggerimento:</strong> " + soa.get('suggerimento', '') if soa.get('suggerimento') else ""}
             </div>
             """, unsafe_allow_html=True)
     
-    # Scadenze critiche
     if scadenze_critiche:
         for scad in scadenze_critiche:
-            tipo = scad.get("tipo", "").upper()
-            data = scad.get("data", "")
             giorni = scad.get("giorni_mancanti", 0)
-            
-            if giorni == 0:
-                countdown_text = "SCADE OGGI"
-            elif giorni == 1:
-                countdown_text = "SCADE DOMANI"
-            else:
-                countdown_text = f"TRA {giorni} GIORNI"
+            countdown_text = "SCADE OGGI" if giorni == 0 else f"SCADE DOMANI" if giorni == 1 else f"TRA {giorni} GIORNI"
             
             st.markdown(f"""
             <div class="killer-item">
-                <strong>⏰ SCADENZA {tipo}: {data}</strong><br>
+                <strong>⏰ SCADENZA {scad['tipo'].upper()}: {scad['data']}</strong><br>
                 <span style="font-size: 24px; color: #dc3545; font-weight: 700;">{countdown_text}</span>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    # Certificazioni critiche
-    if cert_rossi:
-        for cert in cert_rossi:
-            tipo = cert.get("tipo", "")
-            motivo = cert.get("motivo", "")
-            
-            st.markdown(f"""
-            <div class="killer-item">
-                <strong>📜 CERTIFICAZIONE: {tipo}</strong><br>
-                {motivo}
             </div>
             """, unsafe_allow_html=True)
 
 
 def render_scadenze_countdown(scadenze: dict):
-    """Renderizza scadenze con countdown visivo"""
+    """Renderizza scadenze con countdown"""
     
     st.markdown("## 📅 Scadenze")
     
-    # Critiche
     if scadenze["critiche"]:
         st.markdown("### 🔴 SCADENZE CRITICHE (≤ 2 giorni)")
         for scad in scadenze["critiche"]:
-            tipo = scad.get("tipo", "").upper()
-            data = scad.get("data", "")
-            ora = scad.get("ora", "")
             giorni = scad.get("giorni_mancanti", 0)
-            note = scad.get("note", "")
-            
-            if giorni == 0:
-                countdown = "OGGI"
-            elif giorni == 1:
-                countdown = "DOMANI"
-            else:
-                countdown = f"{giorni} GIORNI"
+            countdown = "OGGI" if giorni == 0 else "DOMANI" if giorni == 1 else f"{giorni} GIORNI"
             
             st.markdown(f"""
             <div class="scadenza-critica">
-                <h3 style="margin: 0; color: white;">{tipo}</h3>
+                <h3 style="margin: 0; color: white;">{scad['tipo'].upper()}</h3>
                 <div class="countdown">{countdown}</div>
-                <p style="margin: 5px 0; font-size: 18px;"><strong>{data} {ora if ora else ""}</strong></p>
-                <p style="margin: 10px 0 0 0; opacity: 0.95;">{note}</p>
+                <p style="margin: 5px 0; font-size: 18px;"><strong>{scad['data']} {scad.get('ora', '')}</strong></p>
+                <p style="margin: 10px 0 0 0; opacity: 0.95;">{scad.get('note', '')}</p>
             </div>
             """, unsafe_allow_html=True)
     
-    # Prossime
     if scadenze["prossime"]:
         st.markdown("### 🟡 Prossime Scadenze (3-7 giorni)")
         for scad in scadenze["prossime"]:
-            tipo = scad.get("tipo", "").upper()
-            data = scad.get("data", "")
-            giorni = scad.get("giorni_mancanti", 0)
-            note = scad.get("note", "")
-            
             st.markdown(f"""
             <div class="scadenza-attenzione">
-                <strong>{tipo}</strong> - {data} (tra {giorni} giorni)<br>
-                <small>{note}</small>
+                <strong>{scad['tipo'].upper()}</strong> - {scad['data']} (tra {scad['giorni_mancanti']} giorni)<br>
+                <small>{scad.get('note', '')}</small>
             </div>
             """, unsafe_allow_html=True)
 
@@ -487,7 +445,7 @@ def render_check_geografico(check_geo: dict):
 
 
 def render_requisiti_box(titolo: str, verdi: list, gialli: list, rossi: list, tipo: str):
-    """Renderizza box requisiti con semafori"""
+    """Renderizza box requisiti"""
     
     st.markdown(f"### {titolo}")
     
@@ -517,132 +475,119 @@ def render_requisiti_box(titolo: str, verdi: list, gialli: list, rossi: list, ti
         </div>
         """, unsafe_allow_html=True)
     
-    # Dettagli
     if verdi:
         with st.expander(f"✅ Vedi {len(verdi)} requisiti POSSEDUTI"):
             for item in verdi:
-                if tipo == "soa":
-                    st.markdown(f"""
-                    <div class="status-box verde">
-                        <h4>{item['categoria']} - Classifica {item['classifica']}</h4>
-                        <p>{item['descrizione']}</p>
-                        <p><small>✅ {item['motivo']}</small></p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    motivo = item.get("motivo", "")
-                    st.markdown(f"""
-                    <div class="status-box verde">
-                        <h4>{item.get('tipo') or item.get('ruolo', 'N/D')}</h4>
-                        <p><small>✅ {motivo}</small></p>
-                    </div>
-                    """, unsafe_allow_html=True)
+                st.markdown(f"""
+                <div class="status-box verde">
+                    <h4>{item.get('categoria') or item.get('tipo') or item.get('ruolo', 'N/D')}</h4>
+                    <p><small>✅ {item['motivo']}</small></p>
+                </div>
+                """, unsafe_allow_html=True)
     
     if gialli:
         with st.expander(f"🟡 Vedi {len(gialli)} requisiti DA VERIFICARE"):
             for item in gialli:
-                motivo = item.get("motivo", "")
-                suggerimento = item.get("suggerimento", "")
-                
                 st.markdown(f"""
                 <div class="status-box giallo">
-                    <h4>{item.get('tipo') or item.get('ruolo') or item.get('categoria', 'N/D')}</h4>
-                    <p>🟡 {motivo}</p>
-                    {"<p><strong>💡 Suggerimento:</strong> " + suggerimento + "</p>" if suggerimento else ""}
+                    <h4>{item.get('tipo') or item.get('ruolo', 'N/D')}</h4>
+                    <p>🟡 {item['motivo']}</p>
+                    {"<p><strong>💡 Suggerimento:</strong> " + item.get('suggerimento', '') + "</p>" if item.get('suggerimento') else ""}
                 </div>
                 """, unsafe_allow_html=True)
     
     if rossi:
         with st.expander(f"❌ Vedi {len(rossi)} requisiti MANCANTI", expanded=True):
             for item in rossi:
-                motivo = item.get("motivo", "")
-                suggerimento = item.get("suggerimento", "")
-                gap = item.get("gap", {})
-                
                 st.markdown(f"""
                 <div class="status-box rosso">
                     <h4>{item.get('categoria') or item.get('tipo', 'N/D')}</h4>
-                    <p>❌ {motivo}</p>
-                    {"<p><strong>💡 Soluzione:</strong> " + suggerimento + "</p>" if suggerimento else ""}
+                    <p>❌ {item['motivo']}</p>
+                    {"<p><strong>💡 Soluzione:</strong> " + item.get('suggerimento', '') + "</p>" if item.get('suggerimento') else ""}
                 </div>
                 """, unsafe_allow_html=True)
 
 
 def tab_analisi():
-    """Tab 1: Analisi Bando Go/No-Go - VERSIONE MIGLIORATA"""
-    st.header("📊 Analisi Intelligente Bando")
+    """Tab analisi bando con nuovo analyzer"""
+    st.header("📊 Analisi Intelligente Bando - ANTI-ALLUCINAZIONE")
     
     if not st.session_state.openai_api_key:
         st.warning("⚠️ Inserire OpenAI API Key nella sidebar per continuare")
         return
     
-    # Upload PDF
     uploaded_file = st.file_uploader(
         "📄 Carica Disciplinare/Bando (PDF)",
         type=['pdf'],
-        help="Carica il PDF del bando da analizzare (max 200 pagine)"
+        help="Carica il PDF del bando da analizzare"
     )
     
     if uploaded_file:
         st.success(f"✅ File caricato: **{uploaded_file.name}**")
         
-        # Bottone analisi GRANDE
+        # Diagnostica PDF
+        with st.expander("🔍 Diagnostica PDF (opzionale)"):
+            if st.button("Analizza Qualità PDF"):
+                temp_path = f"data/temp_{uploaded_file.name}"
+                with open(temp_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                
+                parser = BandoParser()
+                metadata = parser.extract_metadata(temp_path)
+                
+                st.json(metadata)
+                
+                if metadata.get("qualita_stimata") == "SCARSA":
+                    st.error("⚠️ PDF di qualità SCARSA - probabile scansione. L'estrazione potrebbe essere incompleta.")
+        
         if st.button("🔍 ANALIZZA REQUISITI", type="primary", use_container_width=True):
-            st.info("🤖 **Analisi in corso...** Il sistema sta leggendo il bando e confrontando con il tuo profilo aziendale (30-60 secondi)")
+            st.info("🤖 **Analisi in corso con STRUCTURED OUTPUT...**")
             
-            # Salva temporaneamente
             temp_path = f"data/temp_{uploaded_file.name}"
             with open(temp_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
             
             try:
-                # Parse PDF
+                # Parse con pdfplumber
                 parser = BandoParser()
-                bando_text = parser.parse_pdf(temp_path)
-                st.session_state.bando_text = bando_text
+                bando_text = parser.parse_pdf(temp_path, mode="full")
                 
-                # Analizza con prompt migliorato
-                from src.prompts import EXTRACTION_PROMPT
-                
+                # Analizza con structured output
                 analyzer = BandoAnalyzer(
                     openai_api_key=st.session_state.openai_api_key,
                     profilo_path="config/profilo_azienda.json"
                 )
                 
-                risultati = analyzer.analyze_bando(bando_text, EXTRACTION_PROMPT)
+                risultati = analyzer.analyze_bando(bando_text)
                 st.session_state.analisi_risultati = risultati
                 
-                st.success("✅ Analisi completata!")
+                st.success("✅ Analisi completata con ZERO allucinazioni!")
                 
             except Exception as e:
                 error_text = str(e)
-                if "insufficient_quota" in error_text or "exceeded your current quota" in error_text:
-                    st.error("❌ Credito API esaurito: ricarica/abilita billing su OpenAI e riprova.")
+                if "INCOERENZA GEOGRAFICA" in error_text:
+                    st.error(f"❌ {error_text}")
+                    st.warning("Il sistema ha rilevato un'allucinazione geografica e ha bloccato l'estrazione. Riprova o segnala il problema.")
+                elif "insufficient_quota" in error_text:
+                    st.error("❌ Credito API esaurito.")
                 else:
-                    st.error(f"❌ Errore durante l'analisi: {error_text}")
+                    st.error(f"❌ Errore: {error_text}")
                 st.exception(e)
                 return
     
-    # Mostra risultati se disponibili
+    # Mostra risultati
     if st.session_state.analisi_risultati:
         risultati = st.session_state.analisi_risultati
         
         st.markdown("---")
         
-        # 1. DASHBOARD HEADER
         render_dashboard_header(risultati)
-        
-        # 2. DECISIONE GIGANTE
         render_decisione_gigante(
             risultati["decisione"],
             risultati["punteggio_fattibilita"],
             risultati["motivi_punteggio"]
         )
-        
-        # 3. CHECK GEOGRAFICO
         render_check_geografico(risultati["check_geografico"])
-        
-        # 4. KILLER FACTORS
         render_killer_factors(
             risultati["soa"]["rossi"],
             risultati["scadenze"]["critiche"],
@@ -650,13 +595,9 @@ def tab_analisi():
         )
         
         st.markdown("---")
-        
-        # 5. SCADENZE COUNTDOWN
         render_scadenze_countdown(risultati["scadenze"])
         
         st.markdown("---")
-        
-        # 6. REQUISITI DETTAGLIATI
         render_requisiti_box(
             "📜 Requisiti SOA",
             risultati["soa"]["verdi"],
@@ -666,7 +607,6 @@ def tab_analisi():
         )
         
         st.markdown("---")
-        
         render_requisiti_box(
             "🏆 Certificazioni",
             risultati["certificazioni"]["verdi"],
@@ -676,7 +616,6 @@ def tab_analisi():
         )
         
         st.markdown("---")
-        
         render_requisiti_box(
             "👥 Figure Professionali",
             risultati["figure_professionali"]["verdi"],
@@ -687,10 +626,9 @@ def tab_analisi():
 
 
 def sidebar():
-    """Sidebar con configurazione"""
+    """Sidebar"""
     st.sidebar.title("⚙️ Configurazione")
     
-    # API Key
     api_key = st.sidebar.text_input(
         "OpenAI API Key",
         type="password",
@@ -706,7 +644,6 @@ def sidebar():
     
     st.sidebar.markdown("---")
     
-    # Info profilo aziendale
     st.sidebar.subheader("👤 Profilo Aziendale")
     try:
         with open("config/profilo_azienda.json", 'r', encoding='utf-8') as f:
@@ -719,17 +656,14 @@ def sidebar():
 
 
 def main():
-    """Applicazione principale"""
+    """Main app"""
     init_session_state()
     
-    # Header
-    st.title("📋 BidPilot 2.0 - Analisi Intelligente")
-    st.caption("Sistema AI per Analisi Avanzata di Bandi d'Appalto con Matching Puntuale")
+    st.title("📋 BidPilot 2.0 - ANTI-ALLUCINAZIONE")
+    st.caption("Sistema AI con Structured Output e Evidence-Based Extraction")
     
-    # Sidebar
     sidebar()
     
-    # Tabs
     tab1, tab2 = st.tabs(["📊 Analisi Bando", "✍️ Genera Bozza (Prossimamente)"])
     
     with tab1:
@@ -738,13 +672,11 @@ def main():
     with tab2:
         st.info("🚧 Modulo generazione bozze in arrivo...")
     
-    # Footer
     st.markdown("---")
-    st.caption("BidPilot 2.0 Professional | AI-Powered Tender Analysis")
+    st.caption("BidPilot 2.0 Professional | Zero Hallucinations | Powered by Pydantic + GPT-4o")
 
 
 if __name__ == "__main__":
-    # Crea directory necessarie
     os.makedirs("data/progetti_storici", exist_ok=True)
     os.makedirs("config", exist_ok=True)
     

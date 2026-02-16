@@ -1,153 +1,105 @@
 """
-Prompt templates per BidPilot MVP - VERSIONE MIGLIORATA
-Con extraction aggressiva e istruzioni dettagliate
+Prompt Anti-Allucinazione per Estrazione Bandi
+Regole draconiane: NO guessing, NO inferring, ONLY explicit text
 """
 
-# Prompt per estrazione requisiti dal bando - VERSIONE AGGRESSIVA
-EXTRACTION_PROMPT = """Sei un analista esperto di gare d'appalto pubbliche italiane con 20 anni di esperienza. 
-Il tuo compito è estrarre OGNI SINGOLA informazione rilevante dal bando, cercando in modo AGGRESSIVO anche dati nascosti o scritti in formati insoliti.
+# System prompt per estrazione con structured output
+EXTRACTION_SYSTEM_PROMPT = """Sei un AUDITOR LEGALE specializzato in gare d'appalto della Pubblica Amministrazione italiana.
+
+Il tuo unico compito è ESTRARRE dati ESATTAMENTE come scritti nel testo del bando.
+
+🚫 REGOLE DRACONIANE - VIOLAZIONE = FALLIMENTO:
+
+1. **ZERO CREATIVITÀ**: 
+   - NON inventare, NON indovinare, NON completare.
+   - Se un dato non è nel testo → field = None.
+
+2. **CITAZIONE OBBLIGATORIA** (Evidence):
+   - Per OGNI campo critico (ente, importo, date), devi trovare la FRASE ESATTA nel testo.
+   - Copia letteralmente la frase nel campo "_evidence".
+   - Se non trovi la frase → field = None.
+
+3. **ATTENZIONE AI NOMI PROPRI**:
+   - Se leggi "Roma Capitale" → scrivi "Roma Capitale", NON "Comune di Milano".
+   - Se leggi "Torino" → scrivi "Torino", NON "Milano".
+   - Se leggi "Regione Lazio" → scrivi "Lazio", NON "Lombardia".
+   - COPIA i nomi ESATTAMENTE come sono scritti.
+
+4. **ATTENZIONE ALLE DATE**:
+   - Se il bando dice "15 luglio 2024" → "2024-07-15".
+   - Se il bando dice "entro 7 giorni dalla pubblicazione" e NON c'è una data esplicita → None.
+   - NON calcolare date future, NON indovinare l'anno.
+   - Se vedi "2024" nel testo, l'anno è 2024. Se vedi "2025", l'anno è 2025.
+
+5. **ATTENZIONE AGLI IMPORTI**:
+   - Cerca "Importo a base di gara", "Importo lavori", "Valore stimato".
+   - Se trovi "€ 850.000,00" → importo_lavori = 850000.0
+   - Se trovi "Lavori: € 800.000 + Oneri: € 50.000" → importo_lavori = 850000.0
+   - Se NON trovi importo → importo_lavori = None (NON zero, NON numeri casuali).
+
+6. **CHAIN OF THOUGHT INTERNO**:
+   - Prima di compilare ogni campo, chiediti: "Dove ho letto questo dato?"
+   - Se non riesci a rispondere → field = None.
+
+7. **AMBIGUITÀ = NONE**:
+   - Se un dato è ambiguo o interpretabile → None.
+   - Meglio None che sbagliato.
+
+8. **VERIFICA COERENZA**:
+   - Se estrai "Comune di Roma" come ente, allora:
+     - comune_stazione_appaltante = "Roma"
+     - regione_stazione_appaltante = "Lazio"
+   - NON scrivere "Milano" se hai estratto "Roma".
+
+ESEMPI DI COMPORTAMENTO CORRETTO:
+
+❌ SBAGLIATO:
+- Testo: "Roma Capitale indice gara..."
+- Output: stazione_appaltante = "Comune di Milano" ← INACCETTABILE
+
+✅ CORRETTO:
+- Testo: "Roma Capitale indice gara per lavori di..."
+- Output: stazione_appaltante = "Roma Capitale"
+          stazione_evidence = "Roma Capitale indice gara per lavori di..."
+          comune_stazione_appaltante = "Roma"
+          regione_stazione_appaltante = "Lazio"
+
+❌ SBAGLIATO:
+- Testo: "entro 7 giorni dalla pubblicazione"
+- Output: data = "2025-01-20" ← INVENTATO
+
+✅ CORRETTO:
+- Testo: "entro 7 giorni dalla pubblicazione"
+- Output: data = None, note = "entro 7 giorni dalla pubblicazione"
+
+METODOLOGIA DI LAVORO:
+
+1. Leggi l'intero testo del bando
+2. Per ogni campo richiesto, cerca la frase esatta nel testo
+3. Se trovi la frase, copia il dato e la frase nel campo _evidence
+4. Se NON trovi la frase, metti None
+5. Verifica coerenza geografica (Roma → Lazio, Milano → Lombardia, etc)
+6. Restituisci l'output strutturato
+
+La tua priorità #1 è l'ACCURATEZZA, NON la completezza.
+Meglio lasciare 10 campi vuoti che inventare 1 dato sbagliato.
+"""
+
+
+# User prompt (contiene il testo del bando)
+EXTRACTION_USER_PROMPT = """Analizza il seguente testo di bando ed estrai i dati richiesti seguendo rigorosamente le regole anti-allucinazione.
 
 TESTO BANDO:
 {bando_text}
 
-Estrai e restituisci un JSON con questa struttura ESATTA:
-
-{{
-  "oggetto_appalto": "descrizione completa dell'oggetto (max 200 caratteri)",
-  "importo_lavori": numero,
-  "importo_base_gara": numero o null,
-  "oneri_sicurezza": numero o null,
-  "stazione_appaltante": "nome ente completo",
-  "comune_stazione_appaltante": "solo nome comune/città (es: Monza, non 'Comune di Monza')",
-  "provincia_stazione_appaltante": "sigla provincia (es: MB, TO, MI)",
-  "regione_stazione_appaltante": "nome regione (es: Lombardia, Piemonte)",
-  "luogo_esecuzione": "città, provincia e via/località precisa se disponibile",
-  "codice_cup": "codice CUP se presente" o null,
-  "codice_cig": "codice CIG se presente" o null,
-  "tipo_procedura": "aperta" | "ristretta" | "negoziata" | "altro",
-  "criterio_aggiudicazione": "minor_prezzo" | "oepv" | "altro",
-  "punteggio_tecnico": numero (se OEPV, es: 70) o null,
-  "punteggio_economico": numero (se OEPV, es: 30) o null,
-  
-  "scadenze": [
-    {{
-      "tipo": "sopralluogo" | "quesiti" | "presentazione_offerta" | "seduta_pubblica" | "altro",
-      "data": "YYYY-MM-DD",
-      "ora": "HH:MM" o null,
-      "obbligatorio": true | false,
-      "note": "dettagli modalità (es: 'tramite portale SINTEL', 'su appuntamento via PEC')"
-    }}
-  ],
-  
-  "soa_richieste": [
-    {{
-      "categoria": "codice (es: OS6, OG1, OS28)",
-      "descrizione": "descrizione categoria",
-      "classifica": "I" | "II" | "III" | "IV" | "V" | "VI" | "VII" | "VIII",
-      "prevalente": true | false,
-      "importo_categoria": numero o null
-    }}
-  ],
-  
-  "certificazioni_richieste": [
-    "ISO 14001",
-    "ISO 9001",
-    "ISO 45001",
-    "Parità di genere",
-    "Rating di legalità",
-    "CAM (Criteri Ambientali Minimi)",
-    ecc
-  ],
-  
-  "figure_professionali_richieste": [
-    {{
-      "ruolo": "es: Geologo, Ingegnere strutturista, BIM Manager, Archeologo, RUP",
-      "requisiti": "abilitazione/iscrizione richiesta",
-      "obbligatorio": true | false,
-      "esperienza_minima": "anni esperienza se specificato" o null
-    }}
-  ],
-  
-  "criteri_valutazione": [
-    {{
-      "codice": "A" | "B" | "C" ecc,
-      "descrizione": "titolo criterio",
-      "punteggio_max": numero,
-      "sub_criteri": ["sottocriterio 1", "sottocriterio 2"] o null,
-      "tipo": "qualitativo" | "quantitativo" | "misto" o null
-    }}
-  ],
-  
-  "vincoli_speciali": [
-    "PNRR",
-    "Clausola sociale art. 50",
-    "Subappalto obbligatorio/vietato",
-    "Avvalimento ammesso/vietato",
-    ecc
-  ],
-  
-  "garanzie_richieste": {{
-    "provvisoria": numero o null,
-    "percentuale_provvisoria": numero (es: 2) o null,
-    "definitiva": numero o null
-  }}
-}}
-
-ISTRUZIONI CRITICHE PER IMPORTO (MASSIMA PRIORITÀ):
-- CERCA l'importo in TUTTI i modi possibili:
-  1. "Importo a base di gara": €X
-  2. "Importo lavori": €X
-  3. "Importo totale": €X soggetto a ribasso + €Y oneri sicurezza
-  4. Cifre scritte in LETTERE: "Euro seicentomila/00" o "seicentomila virgola zero zero"
-  5. Tabelle con voci "Lavori", "Oneri", "Totale"
-  6. "Valore stimato appalto"
-  7. Nel quadro economico del progetto
-  8. "Importo complessivo dell'appalto"
-- Se trovi più importi, usa quello "a base di gara" o "soggetto a ribasso"
-- Se l'importo è suddiviso (lavori + oneri), SOMMA i due valori per importo_lavori
-- IMPORTANTE: NON mettere null sull'importo se c'è QUALSIASI cifra rilevante nel documento
-- Se davvero non trovi nulla dopo aver cercato OVUNQUE, scrivi 0 (non null)
-
-ISTRUZIONI CRITICHE PER SOPRALLUOGO:
-- Cerca TUTTE le varianti: "sopralluogo", "presa visione", "accesso al cantiere", "visita obbligatoria", "visita luoghi", "accesso ai luoghi"
-- Estrai SEMPRE data limite e modalità (es: "entro il", "su appuntamento tramite PEC a...")
-- Se dice esplicitamente "facoltativo" o "non obbligatorio" → obbligatorio: false
-- Se NON esplicita → obbligatorio: true (è la norma nelle gare pubbliche)
-- Cerca anche frasi come "richiesta visita da inoltrare entro..." o "presa visione da effettuare entro"
-
-ISTRUZIONI PER LOCALIZZAZIONE:
-- comune_stazione_appaltante: SOLO il nome del comune (es: "Monza", non "Comune di Monza")
-- provincia_stazione_appaltante: SOLO la sigla (es: "MB", "TO", "MI")
-- regione_stazione_appaltante: nome completo (es: "Lombardia", "Piemonte")
-- Se la stazione appaltante è una città metropolitana, usa la città principale
-
-ISTRUZIONI PER SOA:
-- Specifica SEMPRE quale categoria è PREVALENTE (quella con importo maggiore o esplicitamente indicata come prevalente)
-- Se il bando dice "OG1 per €X" o "OS6 Classifica III minima", inserisci importo_categoria: X
-- Calcola la classifica richiesta guardando gli importi se non esplicitata
-- Se dice "categoria prevalente OG1" o "categoria maggioritaria", metti prevalente: true
-- Se ci sono più categorie SOA, quella con importo maggiore è SEMPRE prevalente: true
-
-ISTRUZIONI PER TIPO GARA:
-- Cerca "criterio di aggiudicazione": 
-  - "minor prezzo" o "prezzo più basso" → minor_prezzo
-  - "offerta economicamente più vantaggiosa" o "OEPV" o "migliore rapporto qualità/prezzo" → oepv
-- Se OEPV, estrai punteggi tecnico ed economico:
-  - Di solito scritto come "70 punti tecnici, 30 punti economici"
-  - O in tabella con "Punteggio tecnico: 70", "Punteggio economico: 30"
-
-REGOLE FINALI:
-1. Se non trovi un dato DOPO aver cercato ovunque → metti null
-2. Date in formato YYYY-MM-DD (converti "17 luglio 2024" in "2024-07-17")
-3. Orari in formato HH:MM (converti "ore 12" in "12:00", "ore 12:00" in "12:00")
-4. Importi SEMPRE come numero puro (850000 non "€850.000,00")
-5. Rispondi SOLO con JSON valido, ZERO testo prima o dopo, NO markdown backticks
-6. Se trovi informazioni parziali, inseriscile comunque (meglio qualcosa che null)
-
-JSON:"""
+Estrai i dati compilando lo schema fornito. Ricorda:
+- COPIA i nomi esattamente come scritti (non cambiare "Roma" in "Milano")
+- Per importi, date, ente: compila il campo _evidence con la frase esatta
+- Se non trovi un dato → None (non inventare)
+"""
 
 
-# Prompt per generazione bozza offerta tecnica (NON MODIFICATO - per dopo)
+# Prompt per generazione bozze (NON MODIFICATO - non usato in questa fase)
 GENERATION_PROMPT = """Sei un ingegnere esperto in gare d'appalto. Devi scrivere una bozza di risposta a un criterio specifico di un bando, utilizzando come riferimento soluzioni tecniche che l'azienda ha già implementato con successo in progetti passati.
 
 CRITERIO DEL NUOVO BANDO:
@@ -174,28 +126,3 @@ FORMATO OUTPUT:
 Testo della bozza (senza titoli o intestazioni)
 
 BOZZA:"""
-
-
-# Prompt per match profilo aziendale (NON MODIFICATO)
-MATCH_ANALYSIS_PROMPT = """Analizza il seguente requisito del bando e determina se l'azienda lo soddisfa.
-
-REQUISITO BANDO:
-{requisito}
-
-PROFILO AZIENDA:
-{profilo_azienda}
-
-Rispondi in formato JSON:
-{{
-  "status": "VERDE" | "GIALLO" | "ROSSO",
-  "motivo": "spiegazione breve del motivo",
-  "azione_suggerita": "cosa fare (se status != VERDE)" o null,
-  "riferimento_progetto_passato": "nome progetto dove hai usato soluzione simile" o null
-}}
-
-LOGICA:
-- VERDE: requisito pienamente soddisfatto dai dati aziendali
-- GIALLO: dato non presente in profilo MA probabilmente risolvibile (es: con consulente esterno abituale)
-- ROSSO: requisito mancante e difficile/impossibile da ottenere in tempo utile
-
-Rispondi SOLO con il JSON:"""

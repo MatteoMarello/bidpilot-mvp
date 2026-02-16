@@ -1,13 +1,16 @@
-# BidPilot MVP - Requirements
+# BidPilot MVP - Requirements AGGIORNATO
 streamlit==1.29.0
 langchain==0.1.0
 langchain-openai==0.0.2
 langchain-community==0.0.10
 chromadb==0.4.22
-pypdf==3.17.4
+
+# PDF Parsing - UPGRADED per evitare allucinazioni
+pdfplumber==0.11.0  # Migliore di pypdf per layout strutturato
+pypdf==3.17.4       # Manteniamo come fallback
+
 python-docx==1.1.0
 tiktoken==0.5.2
 openai==1.6.1
 pydantic==2.5.3
 python-dateutil==2.8.2
-httpx<0.28
