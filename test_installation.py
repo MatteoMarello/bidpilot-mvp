@@ -13,7 +13,6 @@ def test_imports():
     tests = [
         ("Streamlit", "streamlit"),
         ("LangChain", "langchain"),
-        ("LangChain OpenAI", "langchain_openai"),
         ("LangChain Community", "langchain_community"),
         ("ChromaDB", "chromadb"),
         ("PyPDF", "pypdf"),
@@ -30,6 +29,28 @@ def test_imports():
         except ImportError as e:
             print(f"❌ {name}: FAILED - {str(e)}")
             failed.append(name)
+
+    # Compatibilità LangChain OpenAI: nuovo package oppure API legacy in langchain
+    has_langchain_openai = False
+    try:
+        __import__("langchain_openai")
+        has_langchain_openai = True
+        print("✅ LangChain OpenAI: OK (package langchain_openai)")
+    except ImportError:
+        try:
+            from langchain.chat_models import ChatOpenAI  # noqa: F401
+            print("✅ LangChain OpenAI: OK (fallback legacy in langchain.chat_models)")
+            has_langchain_openai = True
+        except ImportError:
+            try:
+                from langchain_community.chat_models import ChatOpenAI  # noqa: F401
+                print("✅ LangChain OpenAI: OK (fallback in langchain_community.chat_models)")
+                has_langchain_openai = True
+            except ImportError as e:
+                print(f"❌ LangChain OpenAI: FAILED - {str(e)}")
+
+    if not has_langchain_openai:
+        failed.append("LangChain OpenAI")
     
     print()
     

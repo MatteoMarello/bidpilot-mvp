@@ -5,7 +5,7 @@ Estrazione deterministica e basata su evidenze
 import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Tuple
-from langchain_openai import ChatOpenAI
+from src.langchain_compat import create_chat_openai
 from langchain.prompts import ChatPromptTemplate
 
 from src.schemas import BandoRequisiti
@@ -34,7 +34,7 @@ class BandoAnalyzer:
     
     def __init__(self, openai_api_key: str, profilo_path: str = "config/profilo_azienda.json"):
         # LLM con temperatura 0 per massima determinismo
-        self.llm = ChatOpenAI(
+        self.llm = create_chat_openai(
             model="gpt-4o",  # Upgraded da gpt-4o-mini per accuracy
             temperature=0,
             api_key=openai_api_key
