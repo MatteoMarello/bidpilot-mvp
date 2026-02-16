@@ -4,7 +4,7 @@ Recupera contenuti da progetti storici e genera bozze
 """
 import os
 from typing import List, Dict, Any
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from src.langchain_compat import create_chat_openai, create_openai_embeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -20,13 +20,13 @@ class RAGEngine:
         self.openai_api_key = openai_api_key
         self.progetti_dir = progetti_dir
         
-        self.llm = ChatOpenAI(
+        self.llm = create_chat_openai(
             model="gpt-4o",
             temperature=0.3,
             api_key=openai_api_key
         )
         
-        self.embeddings = OpenAIEmbeddings(api_key=openai_api_key)
+        self.embeddings = create_openai_embeddings(api_key=openai_api_key)
         
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
