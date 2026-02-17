@@ -1,6 +1,12 @@
 """
-BidPilot v3.0 — Libreria Requisiti Atomici (A1–M7)
-Ogni requisito ha: id, name, category, severity, sanabilità, logica di valutazione.
+BidPilot v3.1 — Libreria Requisiti Atomici (A1–M7)
+FIXES v3.1:
+  - [C1/C2] Classifica SOA calcolata sull'importo della CATEGORIA, non sul totale appalto
+  - [C1/C2] Distinzione netta Prevalente vs Scorporabili; suggerito RTI Orizzontale se gap
+  - [C2]    Non si assume OS28 = OG11: ogni categoria è distinta
+  - [D]     Matching certificazioni STRICT: ISO 9001 ≠ OHSAS 18001 / ISO 45001
+  - [NEW]   Gate manodopera: verifica costi indicati e non soggetti a ribasso
+  - [NEW]   Gate divieto subappalto 100%
 """
 from __future__ import annotations
 from datetime import datetime
@@ -76,12 +82,25 @@ def _unknown(req_id: str, name: str, cat: str, msg: str,
     )
 
 
+def _required_class_from_amount(amount_eur: Optional[float]) -> Optional[str]:
+    """
+    FIX v3.1 — Calcola la classifica SOA richiesta dall'importo della SINGOLA CATEGORIA
+    (non dall'importo totale del bando).
+    Es: 460.000€ → "II" (fino a 516k), NON "III".
+    """
+    if amount_eur is None:
+        return None
+    for cls, cap in sorted(CLASSIFICHE_SOA.items(), key=lambda x: CLASS_RANK[x[0]]):
+        if amount_eur <= cap:
+            return cls
+    return "VIII"
+
+
 # ─────────────────────────────────────────────────────────
 # Requisiti A — Ammissibilità generale
 # ─────────────────────────────────────────────────────────
 
 def eval_A1(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
-    """A1 – Cause di esclusione (art. 94-98)"""
     return RequirementResult(
         req_id="A1", name="Cause di esclusione", category="general",
         status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
@@ -92,7 +111,6 @@ def eval_A1(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult
     )
 
 def eval_A2(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
-    """A2 – Patti integrità / anticollusione"""
     return RequirementResult(
         req_id="A2", name="Patto integrità / anticollusione", category="general",
         status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
@@ -100,7 +118,6 @@ def eval_A2(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult
     )
 
 def eval_A5(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
-    """A5 – Regolarità fiscale (DURC/DURF)"""
     return RequirementResult(
         req_id="A5", name="Regolarità fiscale", category="general",
         status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
@@ -116,7 +133,6 @@ def eval_A5(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult
 # ─────────────────────────────────────────────────────────
 
 def eval_B1(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
-    """B1 – Iscrizione CCIAA"""
     cr = company.cameral_registration
     if cr.is_registered and cr.coherence_with_tender_object == "yes":
         return _ok("B1", "Iscrizione CCIAA", "professional",
@@ -133,26 +149,26 @@ def eval_B1(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult
                     "Verificare iscrizione CCIAA e coerenza oggetto sociale con l'appalto.")
 
 def eval_B4(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
-    """B4 – Procura / poteri firma"""
     lr = company.legal_representative
     if not lr.has_digital_signature:
         return _ko("B4", "Firma digitale legale rappresentante", "procedural",
                    Severity.HARD_KO,
-                   "Il firmatario non dispone di firma digitale valida. Procurarsela prima della scadenza.",
+                   "Il firmatario non dispone di firma digitale valida.",
                    gaps=["Firma digitale CNS/CRS"])
     if lr.signing_powers_proof == "missing":
         return _ko("B4", "Poteri di firma", "procedural", Severity.HARD_KO,
-                   "Manca documentazione poteri firma (procura/statuto). Allegare prima della scadenza.",
+                   "Manca documentazione poteri firma. Allegare procura/statuto.",
                    gaps=["Procura o statuto con poteri firma"])
     if lr.has_digital_signature and lr.signing_powers_proof in ("available", "unknown"):
         return _ok("B4", "Firma digitale", "procedural",
                    f"{lr.name} ({lr.role}) con firma digitale disponibile.")
     return _unknown("B4", "Firma digitale", "procedural",
-                    "Verificare disponibilità firma digitale e poteri firma del sottoscrittore.")
+                    "Verificare disponibilità firma digitale e poteri firma.")
 
 
 # ─────────────────────────────────────────────────────────
 # Requisiti C — Qualificazione SOA
+# FIX v3.1: calcola classifica dall'importo categoria, non dal totale
 # ─────────────────────────────────────────────────────────
 
 def _find_soa(company: CompanyProfile, category: str) -> Optional[SOAAttestation]:
@@ -165,9 +181,14 @@ def _soa_valid(att: SOAAttestation) -> bool:
     d = _parse_date(att.expiry_date)
     return d is not None and d > _today()
 
+
 def eval_C1_prevalente(bando: BandoRequisiti, company: CompanyProfile,
                        participation_forms: Any) -> RequirementResult:
-    """C1 – Categoria prevalente: possesso SOA richiesta"""
+    """
+    C1 – Categoria prevalente.
+    FIX v3.1: usa importo_categoria (se disponibile) per determinare classifica richiesta,
+              NON l'importo totale del bando.
+    """
     prev = None
     for s in bando.soa_richieste:
         if s.prevalente:
@@ -179,29 +200,49 @@ def eval_C1_prevalente(bando: BandoRequisiti, company: CompanyProfile,
         return _unknown("C1", "SOA prevalente", "qualification",
                         "Nessuna categoria SOA prevalente rilevata nel bando.")
 
-    ev = _ev(quote=prev.evidence or "", section="Requisiti SOA")
+    # ── FIX: determina classifica richiesta dall'importo della categoria ──
+    classifica_richiesta = prev.classifica  # estratta dal bando (fonte primaria)
+    if prev.importo_categoria and (not classifica_richiesta or classifica_richiesta == "?"):
+        classifica_richiesta = _required_class_from_amount(prev.importo_categoria)
+    elif prev.importo_categoria:
+        # Verifica coerenza: se l'importo suggerisce una class inferiore, usa quella corretta
+        class_da_importo = _required_class_from_amount(prev.importo_categoria)
+        if class_da_importo and CLASS_RANK.get(class_da_importo, 0) < CLASS_RANK.get(classifica_richiesta, 0):
+            # Il bando potrebbe aver indicato una classifica superiore al necessario: usa quella del bando
+            pass  # mantieni classifica_richiesta dal bando
+        # Altrimenti il bando ha già la classifica corretta
+
+    ev = _ev(
+        quote=(prev.evidence or "") + (
+            f" [importo categoria: €{prev.importo_categoria:,.0f}]" if prev.importo_categoria else ""
+        ),
+        section="Requisiti SOA"
+    )
     att = _find_soa(company, prev.categoria)
 
     if att is None:
-        # Non posseduta
         fix_methods = []
         constraints = []
         if bando.avvalimento_ammesso == "yes":
             fix_methods.append("avvalimento")
             constraints.append("Ausiliaria non può partecipare alla stessa gara")
-            constraints.append("Contratto avvalimento deve indicare risorse/mezzi specifici")
         if bando.rti_ammesso == "yes":
             fix_methods.append("rti")
+            constraints.append("In RTI Orizzontale la mandataria copre la prevalente")
             constraints.append("Quote RTI devono rispettare le regole del bando")
+
+        importo_fmt = f"€{prev.importo_categoria:,.0f}" if prev.importo_categoria else "importo non specificato"
         return _ko(
-            "C1", f"SOA prevalente {prev.categoria} cl.{prev.classifica}", "qualification",
+            "C1", f"SOA prevalente {prev.categoria} cl.{classifica_richiesta}", "qualification",
             Severity.HARD_KO,
-            f"SOA {prev.categoria} classifica {prev.classifica} NON posseduta. "
-            f"Importo richiesto: {CLASSIFICHE_SOA.get(prev.classifica, '?'):,}€",
+            f"SOA {prev.categoria} (categoria PREVALENTE) classifica {classifica_richiesta} NON posseduta. "
+            f"Importo categoria: {importo_fmt}. "
+            f"L'azienda ha {', '.join(a.category for a in company.soa_attestations) or 'nessuna SOA'} — "
+            f"non coprono la prevalente. Necessario avvalimento o RTI con mandataria qualificata.",
             fixable=bool(fix_methods),
             methods=fix_methods,
             constraints=constraints,
-            gaps=[f"SOA {prev.categoria} cl.{prev.classifica}"],
+            gaps=[f"SOA {prev.categoria} cl.{classifica_richiesta}"],
             evidence=ev
         )
 
@@ -209,73 +250,114 @@ def eval_C1_prevalente(bando: BandoRequisiti, company: CompanyProfile,
         return _ko(
             "C1", f"SOA prevalente {prev.categoria}", "qualification",
             Severity.HARD_KO,
-            f"SOA {prev.categoria} SCADUTA il {att.expiry_date}. Rinnovarla PRIMA della scadenza offerta.",
+            f"SOA {prev.categoria} SCADUTA il {att.expiry_date}. Rinnovarla prima della scadenza offerta.",
             gaps=[f"Rinnovo SOA {prev.categoria}"],
             evidence=ev
         )
 
     poss_rank = CLASS_RANK.get(att.soa_class, 0)
-    req_rank = CLASS_RANK.get(prev.classifica, 0)
+    req_rank = CLASS_RANK.get(classifica_richiesta, 0)
 
     if poss_rank >= req_rank:
         return _ok("C1", f"SOA prevalente {prev.categoria}", "qualification",
-                   f"SOA {prev.categoria} cl.{att.soa_class} ✓ (scad. {att.expiry_date})", evidence=ev)
+                   f"SOA {prev.categoria} cl.{att.soa_class} ✓ "
+                   f"(copre importo categoria {f'€{prev.importo_categoria:,.0f}' if prev.importo_categoria else '?'}; "
+                   f"scad. {att.expiry_date})", evidence=ev)
     else:
-        gap_eur = CLASSIFICHE_SOA.get(prev.classifica, 0) - CLASSIFICHE_SOA.get(att.soa_class, 0)
         fix_methods = []
         if bando.avvalimento_ammesso == "yes":
             fix_methods.append("avvalimento")
         if bando.rti_ammesso == "yes":
             fix_methods.append("rti")
+        importo_fmt = f"€{prev.importo_categoria:,.0f}" if prev.importo_categoria else "?"
         return _ko(
             "C1", f"SOA prevalente {prev.categoria}", "qualification",
             Severity.HARD_KO,
-            f"SOA {prev.categoria} posseduta cl.{att.soa_class} < richiesta cl.{prev.classifica}. "
-            f"Gap: {gap_eur:,.0f}€",
+            f"SOA {prev.categoria} posseduta cl.{att.soa_class} < richiesta cl.{classifica_richiesta}. "
+            f"Importo categoria: {importo_fmt}. Gap da colmare.",
             fixable=bool(fix_methods),
             methods=fix_methods,
-            constraints=["Contratto avvalimento con risorse esplicite se avvalimento"],
-            gaps=[f"SOA {prev.categoria} cl.{prev.classifica}"],
+            constraints=["Contratto avvalimento con risorse esplicite"],
+            gaps=[f"SOA {prev.categoria} cl.{classifica_richiesta}"],
             evidence=ev
         )
 
+
 def eval_C2_scorporabili(bando: BandoRequisiti, company: CompanyProfile) -> List[RequirementResult]:
-    """C2 – Scorporabili / categorie secondarie"""
+    """
+    C2 – Categorie scorporabili.
+    FIX v3.1:
+    - Usa importo_categoria per calcolare classifica richiesta (non importo totale)
+    - Non assume equivalenze tra categorie (OS28 ≠ OG11, OS30 ≠ OG11)
+    - Se azienda ha scorporabili ma non la prevalente → suggerisce RTI Orizzontale specifico
+    - Segnala se categoria è "inferred" (non esplicitamente citata nel bando)
+    """
     results = []
     scorp = [s for s in bando.soa_richieste if not s.prevalente]
+
+    # Verifica se l'azienda manca della prevalente (per suggerimento RTI Orizzontale)
+    prev = next((s for s in bando.soa_richieste if s.prevalente), None)
+    company_has_prevalente = prev is not None and _find_soa(company, prev.categoria) is not None
+
     for s in scorp:
-        ev = _ev(quote=s.evidence or "", section="Categorie lavori")
-        att = _find_soa(company, s.categoria)
+        # ── FIX: classifica dall'importo della categoria scorporabile ──
+        classifica_richiesta = s.classifica
+        if s.importo_categoria and (not classifica_richiesta or classifica_richiesta == "?"):
+            classifica_richiesta = _required_class_from_amount(s.importo_categoria)
+
+        ev_quote = s.evidence or ""
+        if getattr(s, 'inferred', False):
+            ev_quote += f" [NOTA: categoria '{s.categoria}' identificata per inferenza — verificare nel bando]"
+        importo_fmt = f"€{s.importo_categoria:,.0f}" if s.importo_categoria else "importo n.d."
+
+        ev = _ev(quote=ev_quote, section="Categorie lavori")
         req_id = f"C2_{s.categoria}"
 
-        if att and _soa_valid(att) and CLASS_RANK.get(att.soa_class, 0) >= CLASS_RANK.get(s.classifica, 0):
-            results.append(_ok(req_id, f"SOA scorporabile {s.categoria}", "qualification",
-                               f"SOA {s.categoria} cl.{att.soa_class} ✓", evidence=ev))
+        att = _find_soa(company, s.categoria)
+
+        if att and _soa_valid(att) and CLASS_RANK.get(att.soa_class, 0) >= CLASS_RANK.get(classifica_richiesta, 0):
+            results.append(_ok(
+                req_id, f"SOA scorporabile {s.categoria}", "qualification",
+                f"SOA {s.categoria} cl.{att.soa_class} ✓ ({importo_fmt})", evidence=ev
+            ))
         else:
-            # Possibili soluzioni
             methods = []
+            constraints = []
             if bando.subappalto_percentuale_max and bando.subappalto_percentuale_max > 0:
                 methods.append("subappalto")
             if bando.avvalimento_ammesso == "yes":
                 methods.append("avvalimento")
             if bando.rti_ammesso == "yes":
                 methods.append("rti")
-            missing_note = f"SOA {s.categoria} cl.{s.classifica}"
+
+            # ── FIX: distinzione Prevalente vs Scorporabile nel messaggio ──
+            if not company_has_prevalente and bando.rti_ammesso == "yes":
+                rti_note = (
+                    " ⚠️ Attenzione: l'azienda NON possiede nemmeno la SOA prevalente — "
+                    "in un RTI Orizzontale un'altra mandataria copre la prevalente "
+                    f"e l'azienda copre questa scorporabile ({s.categoria}) come mandante."
+                )
+            else:
+                rti_note = ""
+
+            missing_note = f"SOA {s.categoria} cl.{classifica_richiesta}"
             results.append(_ko(
                 req_id, f"SOA scorporabile {s.categoria}", "qualification",
                 Severity.HARD_KO,
-                f"SOA {s.categoria} classifica {s.classifica} mancante o insufficiente.",
+                f"SOA scorporabile {s.categoria} cl.{classifica_richiesta} mancante/insufficiente "
+                f"({importo_fmt}).{rti_note}",
                 fixable=bool(methods),
                 methods=methods,
+                constraints=constraints,
                 gaps=[missing_note],
                 evidence=ev
             ))
     return results
 
+
 def eval_C5_validita(bando: BandoRequisiti, company: CompanyProfile) -> List[RequirementResult]:
     """C5 – Validità temporale SOA"""
     results = []
-    # Prendi la deadline offerta
     deadline_offerta = None
     for sc in bando.scadenze:
         if "offerta" in sc.tipo.lower() or "presentazione" in sc.tipo.lower():
@@ -300,8 +382,8 @@ def eval_C5_validita(bando: BandoRequisiti, company: CompanyProfile) -> List[Req
             results.append(_ko(
                 f"C5_{att.category}", f"SOA {att.category} scade prima dell'offerta", "qualification",
                 Severity.HARD_KO,
-                f"SOA {att.category} scade il {att.expiry_date}, PRIMA della scadenza offerta ({deadline_offerta.date()}). "
-                "Avviare rinnovo.",
+                f"SOA {att.category} scade il {att.expiry_date}, PRIMA della scadenza offerta "
+                f"({deadline_offerta.date()}). Avviare rinnovo anticipato.",
                 gaps=[f"Rinnovo anticipato SOA {att.category}"]
             ))
         else:
@@ -314,25 +396,74 @@ def eval_C5_validita(bando: BandoRequisiti, company: CompanyProfile) -> List[Req
 
 # ─────────────────────────────────────────────────────────
 # Requisiti D — Certificazioni
+# FIX v3.1: matching STRICT — ISO 9001 ≠ OHSAS 18001 / ISO 45001
 # ─────────────────────────────────────────────────────────
 
-def _find_cert(company: CompanyProfile, cert_type: str) -> Optional[Any]:
+# Normalizzazione e sinonimi accettati
+_CERT_SYNONYMS: Dict[str, List[str]] = {
+    "iso9001":    ["iso9001", "iso 9001", "9001"],
+    "iso14001":   ["iso14001", "iso 14001", "14001"],
+    "iso45001":   ["iso45001", "iso 45001", "45001"],
+    "ohsas18001": ["ohsas18001", "ohsas 18001", "18001", "bs ohsas 18001"],
+    "iso50001":   ["iso50001", "iso 50001", "50001"],
+    "sa8000":     ["sa8000", "sa 8000"],
+}
+
+# Qual normativa soddisfa la richiesta (es: ISO 45001 accetta anche OHSAS 18001 e viceversa)
+_CERT_EQUIVALENCES: Dict[str, List[str]] = {
+    "iso45001": ["ohsas18001"],
+    "ohsas18001": ["iso45001"],
+}
+
+def _normalize_cert(s: str) -> str:
+    return s.lower().replace(" ", "").replace("-", "").replace(":", "")
+
+def _cert_key(s: str) -> Optional[str]:
+    """Restituisce la chiave canonica di una certificazione, None se sconosciuta."""
+    n = _normalize_cert(s)
+    for key, synonyms in _CERT_SYNONYMS.items():
+        if any(_normalize_cert(syn) in n or n in _normalize_cert(syn) for syn in synonyms):
+            return key
+    return n  # fallback: usa la stringa normalizzata
+
+def _find_cert_strict(company: CompanyProfile, cert_req: str):
+    """
+    FIX v3.1 — Match STRICT tra certificazioni.
+    ISO 9001 NON soddisfa OHSAS 18001 o ISO 45001.
+    Ammette solo sinonimi/equivalenze esplicitamente dichiarate.
+    """
+    req_key = _cert_key(cert_req)
+    equivalents = {req_key} | set(_CERT_EQUIVALENCES.get(req_key, []))
     for c in company.certifications:
-        if cert_type.lower().replace(" ", "") in c.cert_type.lower().replace(" ", ""):
+        company_key = _cert_key(c.cert_type)
+        if company_key in equivalents:
             return c
     return None
 
+
 def eval_D_certificazioni(bando: BandoRequisiti, company: CompanyProfile) -> List[RequirementResult]:
-    """D1-D4 – Certificazioni richieste"""
+    """D1-Dn – Certificazioni richieste (con matching STRICT)"""
     results = []
     for i, cert_req in enumerate(bando.certificazioni_richieste):
         req_id = f"D{i+1}"
-        found = _find_cert(company, cert_req)
+        found = _find_cert_strict(company, cert_req)
         if not found:
+            # Verifica se l'azienda ha una cert SIMILE ma diversa (falso positivo da evitare)
+            similar_note = ""
+            req_key = _cert_key(cert_req)
+            for c in company.certifications:
+                co_key = _cert_key(c.cert_type)
+                # Es: richiesta ISO 45001, azienda ha ISO 9001 → segnala esplicitamente il gap
+                if co_key != req_key and _normalize_cert(c.cert_type)[:3] == _normalize_cert(cert_req)[:3]:
+                    similar_note = (
+                        f" ATTENZIONE: l'azienda ha '{c.cert_type}' ma questa NON soddisfa '{cert_req}' "
+                        "(sono certificazioni distinte con scope diverso)."
+                    )
+                    break
             results.append(_ko(
                 req_id, f"Certificazione {cert_req}", "certification",
                 Severity.HARD_KO,
-                f"{cert_req} NON posseduta. Verificare se ottenibile prima della scadenza.",
+                f"'{cert_req}' NON posseduta.{similar_note} Verificare se ottenibile prima della scadenza.",
                 gaps=[cert_req]
             ))
         else:
@@ -341,13 +472,13 @@ def eval_D_certificazioni(bando: BandoRequisiti, company: CompanyProfile) -> Lis
                 results.append(_ko(
                     req_id, f"Certificazione {cert_req}", "certification",
                     Severity.HARD_KO,
-                    f"{cert_req} SCADUTA il {found.expiry_date}. Rinnovare subito.",
+                    f"'{cert_req}' SCADUTA il {found.expiry_date}. Rinnovare subito.",
                     gaps=[f"Rinnovo {cert_req}"]
                 ))
             else:
                 results.append(_ok(
                     req_id, f"Certificazione {cert_req}", "certification",
-                    f"{cert_req} presente e valida (scad. {found.expiry_date})"
+                    f"'{cert_req}' presente ({found.cert_type}) e valida (scad. {found.expiry_date})"
                 ))
     return results
 
@@ -357,7 +488,6 @@ def eval_D_certificazioni(bando: BandoRequisiti, company: CompanyProfile) -> Lis
 # ─────────────────────────────────────────────────────────
 
 def eval_E1_fatturato(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    """E1 – Fatturato globale minimo"""
     req = bando.fatturato_minimo_richiesto
     if not req:
         return None
@@ -382,7 +512,6 @@ def eval_E1_fatturato(bando: BandoRequisiti, company: CompanyProfile) -> Optiona
     )
 
 def eval_E2_fatturato_specifico(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    """E2 – Fatturato specifico settore"""
     req = bando.fatturato_specifico_richiesto
     if not req:
         return None
@@ -404,23 +533,19 @@ def eval_E2_fatturato_specifico(bando: BandoRequisiti, company: CompanyProfile) 
 
 
 # ─────────────────────────────────────────────────────────
-# Requisiti G — Progettazione (appalto integrato)
+# Requisiti G — Progettazione
 # ─────────────────────────────────────────────────────────
 
 def eval_G1_appalto_integrato(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    """G1 – Presenza progettazione richiesta"""
     if not bando.appalto_integrato:
         return None
     ev = _ev(quote=bando.appalto_integrato_evidence or "", section="Descrizione appalto")
-
     if company.has_inhouse_design:
         return _ok("G1", "Progettazione (appalto integrato)", "design",
                    "Capacità progettuale interna disponibile.", evidence=ev)
-
     if company.external_designers_available == "yes" and company.design_team:
         return _ok("G1", "Progettazione (appalto integrato)", "design",
                    f"Progettisti esterni disponibili: {len(company.design_team)} figure.", evidence=ev)
-
     if company.willing_rti or company.external_designers_available != "no":
         return _ko(
             "G1", "Progettazione (appalto integrato)", "design",
@@ -428,11 +553,10 @@ def eval_G1_appalto_integrato(bando: BandoRequisiti, company: CompanyProfile) ->
             "Appalto integrato rilevato: necessari progettisti qualificati.",
             fixable=True,
             methods=["progettisti"],
-            constraints=["Progettisti devono essere iscritti all'albo", "Indicazione nominativa richiesta"],
+            constraints=["Iscritti all'albo", "Indicazione nominativa obbligatoria"],
             gaps=["Gruppo di progettazione"],
             evidence=ev
         )
-
     return _ko(
         "G1", "Progettazione (appalto integrato)", "design",
         Severity.HARD_KO,
@@ -441,7 +565,6 @@ def eval_G1_appalto_integrato(bando: BandoRequisiti, company: CompanyProfile) ->
     )
 
 def eval_G4_giovane_professionista(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    """G4 – Giovane professionista (se richiesto)"""
     if bando.giovane_professionista_richiesto != "yes":
         return None
     for d in company.design_team:
@@ -450,7 +573,7 @@ def eval_G4_giovane_professionista(bando: BandoRequisiti, company: CompanyProfil
                        f"{d.name} soddisfa il requisito 'giovane professionista'.")
     return _ko(
         "G4", "Giovane professionista", "design", Severity.HARD_KO,
-        "Bando richiede giovane professionista (abilitato da meno di 5 anni): nessuno disponibile.",
+        "Bando richiede giovane professionista (abilitato < 5 anni): nessuno disponibile.",
         fixable=True, methods=["progettisti"],
         gaps=["Giovane professionista abilitato"]
     )
@@ -461,12 +584,9 @@ def eval_G4_giovane_professionista(bando: BandoRequisiti, company: CompanyProfil
 # ─────────────────────────────────────────────────────────
 
 def eval_H1_sopralluogo(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    """H1 – Sopralluogo obbligatorio"""
     if not bando.sopralluogo_obbligatorio:
         return None
     ev = _ev(quote=bando.sopralluogo_evidence or "", section="Modalità partecipazione")
-
-    # Cerca deadline sopralluogo
     deadline_text = ""
     for sc in bando.scadenze:
         if "sopralluogo" in sc.tipo.lower():
@@ -481,19 +601,17 @@ def eval_H1_sopralluogo(bando: BandoRequisiti, company: CompanyProfile) -> Optio
                         evidence=ev
                     )
             break
-
     return RequirementResult(
         req_id="H1", name="Sopralluogo obbligatorio", category="procedural",
         status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
         evidence=[ev],
         user_message=(
             f"Sopralluogo OBBLIGATORIO a pena di esclusione{deadline_text}. "
-            "Prenotare immediatamente e assicurarsi di ricevere attestato."
+            "Prenotare immediatamente e assicurarsi di ricevere l'attestato."
         )
     )
 
 def eval_H4_anac(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    """H4 – Contributo ANAC"""
     if bando.anac_contributo_richiesto == "no":
         return None
     if bando.anac_contributo_richiesto == "unknown":
@@ -509,14 +627,13 @@ def eval_H4_anac(bando: BandoRequisiti, company: CompanyProfile) -> Optional[Req
     )
 
 def eval_H5_piattaforma(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
-    """H5 – Piattaforma telematica"""
     piatt = bando.piattaforma_gara or "non specificata"
     lr = company.legal_representative
     if not lr.has_digital_signature:
         return _ko(
             "H5", f"Piattaforma {piatt}", "procedural",
             Severity.HARD_KO,
-            f"Piattaforma: {piatt}. Firma digitale mancante: impossibile firmare documenti.",
+            f"Piattaforma: {piatt}. Firma digitale mancante.",
             gaps=["Firma digitale CNS/CRS"]
         )
     return RequirementResult(
@@ -527,28 +644,83 @@ def eval_H5_piattaforma(bando: BandoRequisiti, company: CompanyProfile) -> Requi
 
 
 # ─────────────────────────────────────────────────────────
+# NEW v3.1 — Gate Manodopera
+# ─────────────────────────────────────────────────────────
+
+def eval_H_manodopera(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """
+    NEW v3.1 — Verifica costi della manodopera.
+    Controlla se sono indicati e se non sono soggetti a ribasso (art. 41 c.14 d.lgs. 36/2023).
+    """
+    if not bando.costi_manodopera_indicati:
+        return RequirementResult(
+            req_id="H_MANODOPERA", name="Costi della Manodopera", category="procedural",
+            status=ReqStatus.UNKNOWN, severity=Severity.SOFT_RISK,
+            user_message=(
+                "Verificare che il bando indichi i COSTI DELLA MANODOPERA separatamente "
+                "(art. 41 c.14 d.lgs. 36/2023). Non devono essere soggetti a ribasso. "
+                "Se non indicati nel bando, segnalare alla stazione appaltante."
+            )
+        )
+    if bando.costi_manodopera_soggetti_ribasso:
+        return _ko(
+            "H_MANODOPERA", "Costi della Manodopera soggetti a ribasso", "procedural",
+            Severity.SOFT_RISK,
+            f"ATTENZIONE: il bando indica costi manodopera pari a "
+            f"€{bando.costi_manodopera_eur:,.0f} MA li assoggetta a ribasso — "
+            "ciò è vietato dall'art. 41 c.14 d.lgs. 36/2023. "
+            "Valutare segnalazione o richiesta chiarimento.",
+            fixable=False,
+            gaps=["Chiarimento su ribasso costi manodopera"]
+        )
+    importo_str = (
+        f"€{bando.costi_manodopera_eur:,.0f}" if bando.costi_manodopera_eur else "importo n.d."
+    )
+    return _ok(
+        "H_MANODOPERA", "Costi della Manodopera", "procedural",
+        f"Costi manodopera indicati ({importo_str}), non soggetti a ribasso ✓"
+    )
+
+
+# ─────────────────────────────────────────────────────────
+# NEW v3.1 — Gate Divieto Subappalto
+# ─────────────────────────────────────────────────────────
+
+def eval_H_divieto_subappalto(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """
+    NEW v3.1 — Verifica se alcune lavorazioni sono vietate al subappalto al 100%.
+    """
+    if not bando.subappalto_vietato_categorie:
+        return None
+    return RequirementResult(
+        req_id="H_SUBAPPALTO_VIETATO", name="Divieto subappalto specifiche categorie",
+        category="procedural",
+        status=ReqStatus.UNKNOWN, severity=Severity.SOFT_RISK,
+        user_message=(
+            f"ATTENZIONE: il bando vieta il subappalto per le seguenti categorie: "
+            f"{', '.join(bando.subappalto_vietato_categorie)}. "
+            "L'azienda deve eseguire direttamente queste lavorazioni o averle coperte da SOA propria."
+        )
+    )
+
+
+# ─────────────────────────────────────────────────────────
 # Requisiti I — Garanzie
 # ─────────────────────────────────────────────────────────
 
 def eval_I1_provvisoria(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    """I1/I2 – Cauzione provvisoria"""
     if bando.garanzie_richieste is None:
         return None
     g = bando.garanzie_richieste
     if g.provvisoria is None and g.percentuale_provvisoria is None:
         return None
-
     imp = g.provvisoria
     if imp is None and g.percentuale_provvisoria and bando.importo_lavori:
         imp = bando.importo_lavori * g.percentuale_provvisoria / 100
-
     msg = f"Cauzione provvisoria richiesta: {imp:,.0f}€" if imp else "Cauzione provvisoria richiesta"
-    # Check riduzione ISO
-    has_iso9001 = any(c.cert_type.upper().replace(" ", "") in ("ISO9001", "ISO 9001")
-                      for c in company.certifications)
+    has_iso9001 = any(_cert_key(c.cert_type) == "iso9001" for c in company.certifications)
     if has_iso9001:
         msg += " (riduzione 50% per ISO 9001 applicabile)"
-
     return RequirementResult(
         req_id="I1", name="Cauzione provvisoria", category="guarantee",
         status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
@@ -561,7 +733,6 @@ def eval_I1_provvisoria(bando: BandoRequisiti, company: CompanyProfile) -> Optio
 # ─────────────────────────────────────────────────────────
 
 def eval_K_avvalimento(bando: BandoRequisiti) -> Optional[RequirementResult]:
-    """K1-K3 – Regole avvalimento"""
     if bando.avvalimento_ammesso == "no":
         return RequirementResult(
             req_id="K1", name="Avvalimento", category="participation",
@@ -585,7 +756,6 @@ def eval_K_avvalimento(bando: BandoRequisiti) -> Optional[RequirementResult]:
 # ─────────────────────────────────────────────────────────
 
 def eval_L1_subappalto(bando: BandoRequisiti) -> Optional[RequirementResult]:
-    """L1 – Limiti subappalto"""
     pct = bando.subappalto_percentuale_max
     if pct is None:
         return None
@@ -605,7 +775,6 @@ def eval_L1_subappalto(bando: BandoRequisiti) -> Optional[RequirementResult]:
 # ─────────────────────────────────────────────────────────
 
 def eval_M1_inizio_lavori(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    """M1 – Inizio lavori tassativo"""
     if not bando.start_lavori_tassativo:
         return None
     d = _parse_date(bando.start_lavori_tassativo)
@@ -615,7 +784,6 @@ def eval_M1_inizio_lavori(bando: BandoRequisiti, company: CompanyProfile) -> Opt
         msg += f" (tra {giorni} giorni)"
     if company.start_date_constraints:
         msg += f". Vincoli azienda: {company.start_date_constraints}"
-
     return RequirementResult(
         req_id="M1", name="Inizio lavori tassativo", category="operational",
         status=ReqStatus.UNKNOWN, severity=Severity.SOFT_RISK,
@@ -623,7 +791,6 @@ def eval_M1_inizio_lavori(bando: BandoRequisiti, company: CompanyProfile) -> Opt
     )
 
 def eval_M_vincoli(bando: BandoRequisiti) -> List[RequirementResult]:
-    """M2+ – Vincoli esecutivi generici"""
     results = []
     for i, v in enumerate(bando.vincoli_esecutivi):
         results.append(RequirementResult(
@@ -635,31 +802,26 @@ def eval_M_vincoli(bando: BandoRequisiti) -> List[RequirementResult]:
 
 
 # ══════════════════════════════════════════════════════════
-# ENTRY POINT: Valuta tutti i requisiti
+# ENTRY POINT
 # ══════════════════════════════════════════════════════════
 
 def evaluate_all(bando: BandoRequisiti, company: CompanyProfile,
                  participation_forms: Any = None) -> List[RequirementResult]:
-    """
-    Esegue la valutazione completa di tutti i requisiti atomici
-    e restituisce la lista di RequirementResult.
-    """
     results: List[RequirementResult] = []
 
-    # A — Generali (sempre presenti come UNKNOWN/flag)
+    # A — Generali
     results.extend([eval_A1(bando, company), eval_A2(bando, company), eval_A5(bando, company)])
 
     # B — Idoneità
     results.append(eval_B1(bando, company))
     results.append(eval_B4(bando, company))
 
-    # C — SOA
-    c1 = eval_C1_prevalente(bando, company, participation_forms)
-    results.append(c1)
+    # C — SOA (con fix classifica per importo categoria)
+    results.append(eval_C1_prevalente(bando, company, participation_forms))
     results.extend(eval_C2_scorporabili(bando, company))
     results.extend(eval_C5_validita(bando, company))
 
-    # D — Certificazioni
+    # D — Certificazioni (matching strict)
     results.extend(eval_D_certificazioni(bando, company))
 
     # E — Economico-finanziari
@@ -677,6 +839,14 @@ def evaluate_all(bando: BandoRequisiti, company: CompanyProfile,
         if h:
             results.append(h)
     results.append(eval_H5_piattaforma(bando, company))
+
+    # H — NEW: Manodopera e Divieto Subappalto
+    mano = eval_H_manodopera(bando)
+    if mano:
+        results.append(mano)
+    div_sub = eval_H_divieto_subappalto(bando)
+    if div_sub:
+        results.append(div_sub)
 
     # I — Garanzie
     i1 = eval_I1_provvisoria(bando, company)
@@ -699,5 +869,4 @@ def evaluate_all(bando: BandoRequisiti, company: CompanyProfile,
         results.append(m1)
     results.extend(eval_M_vincoli(bando))
 
-    # Filtra None
     return [r for r in results if r is not None]

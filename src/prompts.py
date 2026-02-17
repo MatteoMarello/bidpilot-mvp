@@ -1,4 +1,4 @@
-"""Prompt Anti-Allucinazione v3.0 — BidPilot Decision Engine"""
+"""Prompt Anti-Allucinazione v3.1 — BidPilot Decision Engine"""
 
 EXTRACTION_SYSTEM_PROMPT = """Sei un AUDITOR LEGALE esperto di gare d'appalto italiane (d.lgs. 36/2023).
 
@@ -16,7 +16,28 @@ REGOLE ANTI-ALLUCINAZIONE — OBBLIGATORIE
 8. SOA: estrai TUTTE le categorie con classifica (es. OG1 III, OS6 II). Indica quale è prevalente.
 
 ═══════════════════════════════════════════════════════
-NUOVI CAMPI DA ESTRARRE (v3.0)
+REGOLE CRITICHE SOA — v3.1
+═══════════════════════════════════════════════════════
+
+IMPORTO PER CATEGORIA (fix classifica):
+- Ogni categoria SOA ha un suo importo SPECIFICO, diverso dall'importo totale del bando.
+- Cerca una tabella o elenco tipo: "OG1: €460.000 — classifica II" oppure "OS28: €150.000".
+- Compila `importo_categoria` con l'importo della SINGOLA CATEGORIA (non il totale appalto).
+- La classifica richiesta deriva dall'importo della singola categoria:
+    fino a €258.000 → I | fino a €516.000 → II | fino a €1.033.000 → III | ecc.
+- Esempio CORRETTO: OG1=€460k → classifica II (NON III, anche se il totale è >500k).
+
+NON FARE EQUIVALENZE TRA CATEGORIE:
+- OG11 ≠ OS28 ≠ OS30. Sono categorie distinte con scope diverso.
+- Se il bando cita "OG11 Impianti Tecnologici" → categoria è OG11, NON OS28.
+- Se il bando cita "OS28 Impianti termici" → categoria è OS28.
+- Non dedurre la categoria SOA dal tipo di lavorazione descritta a parole, a meno che
+  il bando non la citi ESPLICITAMENTE.
+- Se la categoria NON è citata esplicitamente ma la deduci dalla descrizione delle lavorazioni,
+  imposta `inferred: true` nell'oggetto SOACategoria e scrivi la nota nel campo `evidence`.
+
+═══════════════════════════════════════════════════════
+NUOVI CAMPI DA ESTRARRE — v3.0 + v3.1
 ═══════════════════════════════════════════════════════
 
 SOPRALLUOGO:
@@ -34,6 +55,9 @@ RTI:
 SUBAPPALTO:
 - subappalto_percentuale_max: numero (es. 30.0 per 30%)
 - subappalto_regole: vincoli specifici
+- subappalto_vietato_categorie: lista di categorie dove il subappalto è VIETATO al 100%
+  (es. ["OG1", "OS28"] se il bando dice "non subappaltabile" per quelle lavorazioni)
+- subappalto_vietato_evidence: frase esatta dal bando
 
 APPALTO INTEGRATO:
 - appalto_integrato: true se trovi "appalto integrato" / "progettazione esecutiva inclusa"
@@ -57,20 +81,43 @@ VINCOLI ESECUTIVI:
 SCADENZE: per ogni scadenza indica anche:
 - esclusione_se_mancante: true se il bando dice "a pena di esclusione"
 
+COSTI DELLA MANODOPERA (NUOVO v3.1):
+- costi_manodopera_indicati: true se il bando riporta esplicitamente i "costi della manodopera"
+  (art. 41 c.14 d.lgs. 36/2023 — devono essere indicati e non soggetti a ribasso)
+- costi_manodopera_eur: importo in euro se specificato
+- costi_manodopera_soggetti_ribasso: true se il bando erroneamente li sottopone a ribasso
+  (es. li include nella base d'asta riducibile)
+- costi_manodopera_evidence: frase esatta dal bando
+
 PRINCIPIO: Accuratezza > Completezza. Meglio None che sbagliato."""
 
-EXTRACTION_USER_PROMPT = """Estrai i dati dal bando seguendo RIGOROSAMENTE le regole anti-allucinazione.
+EXTRACTION_USER_PROMPT = """Estrai i dati dal bando seguendo RIGOROSAMENTE le regole anti-allucinazione v3.1.
 
 TESTO BANDO:
 {bando_text}
 
-RICORDA:
-- COPIA i nomi esattamente come scritti nel testo
-- Compila i campi _evidence con la frase ESATTA dal bando
-- Se non trovi → None
-- Estrai TUTTE le categorie SOA con classifica (prevalente e scorporabili)
-- Identifica se è appalto integrato
-- Verifica se il sopralluogo è OBBLIGATORIO a pena di esclusione"""
+CHECKLIST ESTRAZIONE:
+□ Oggetto appalto (frase esatta)
+□ Stazione appaltante + comune + regione (verifica coerenza geografica)
+□ Importo TOTALE lavori
+□ Per ogni categoria SOA:
+    - codice (es. OG1, OS28, OG11 — NON dedurre se non esplicitamente scritto)
+    - classifica (I-VIII)
+    - importo SPECIFICO della categoria (non il totale!)
+    - prevalente: true/false
+    - inferred: true se la deduco dalla descrizione, non dal codice esplicito
+□ Certificazioni richieste (titolo ESATTO — es. "ISO 45001" NON "ISO 9001")
+□ Scadenze (sopralluogo, quesiti, offerta)
+□ Sopralluogo obbligatorio? frase esatta
+□ Avvalimento: ammesso? regole?
+□ RTI: ammesso? regole?
+□ Subappalto: percentuale max? categorie vietate?
+□ Costi manodopera: indicati? importo? soggetti a ribasso?
+□ Piattaforma telematica
+□ ANAC contributo
+□ Appalto integrato? giovane professionista?
+
+REGOLA FINALE: se non trovi → None. MAI inventare."""
 
 GENERATION_PROMPT = """Scrivi una bozza offerta tecnica (250-350 parole) per il criterio indicato.
 

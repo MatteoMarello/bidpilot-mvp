@@ -1,6 +1,8 @@
 """
-BidPilot v3.0 - Schemi Pydantic
-CompanyProfile · TenderProfile · DecisionReport
+BidPilot v3.1 - Schemi Pydantic
+CHANGES v3.1:
+  - SOACategoria: aggiunto campo `inferred` (categoria identificata per inferenza)
+  - BandoRequisiti: aggiunti campi manodopera e divieto subappalto per categorie
 """
 from __future__ import annotations
 from pydantic import BaseModel, Field
@@ -13,9 +15,9 @@ from enum import Enum
 # ══════════════════════════════════════════════════════════
 
 class Severity(str, Enum):
-    HARD_KO  = "HARD_KO"
+    HARD_KO   = "HARD_KO"
     SOFT_RISK = "SOFT_RISK"
-    INFO     = "INFO"
+    INFO      = "INFO"
 
 class ReqStatus(str, Enum):
     OK      = "OK"
@@ -84,47 +86,32 @@ class StaffRole(BaseModel):
 
 class Designer(BaseModel):
     name: str = ""
-    profession: str = ""   # "ingegnere" | "architetto" | …
+    profession: str = ""
     order_registration: Literal["yes", "no", "unknown"] = "unknown"
     license_date: str = ""
     young_professional: Literal["yes", "no", "unknown"] = "unknown"
 
 class CompanyProfile(BaseModel):
-    # Identità
     legal_name: str = ""
     vat_id: str = ""
     tax_id: str = ""
     registered_office: str = ""
     pec: str = ""
     legal_representative: LegalRepresentative = Field(default_factory=LegalRepresentative)
-
-    # CCIAA
     cameral_registration: CameralRegistration = Field(default_factory=CameralRegistration)
-
-    # SOA – lista dettagliata per categoria/classifica/scadenza
     soa_attestations: List[SOAAttestation] = Field(default_factory=list)
-
-    # Certificazioni
     certifications: List[Certification] = Field(default_factory=list)
-
-    # Finanziari
     turnover_by_year: List[TurnoverEntry] = Field(default_factory=list)
     sector_turnover_by_year: List[SectorTurnoverEntry] = Field(default_factory=list)
     bank_references_available: Literal["yes", "no", "unknown"] = "unknown"
-
-    # Tecnici
     cel_records_available: Literal["yes", "no", "unknown"] = "unknown"
     similar_works: List[SimilarWork] = Field(default_factory=list)
     avg_headcount: int = 0
     key_roles: List[StaffRole] = Field(default_factory=list)
     equipment_capabilities: str = ""
-
-    # Progettazione
     has_inhouse_design: bool = False
     external_designers_available: Literal["yes", "no", "unknown"] = "unknown"
     design_team: List[Designer] = Field(default_factory=list)
-
-    # Preferenze di partecipazione
     willing_rti: bool = True
     willing_avvalimento: bool = True
     willing_subcontract: bool = True
@@ -142,11 +129,11 @@ class Evidence(BaseModel):
     section: str = ""
 
 class Deadline(BaseModel):
-    dtype: str                        # "questions" | "site_visit" | "offer_submission" | "public_session"
-    datetime_str: Optional[str] = None  # YYYY-MM-DDTHH:MM
+    dtype: str
+    datetime_str: Optional[str] = None
     timezone: str = "Europe/Rome"
     is_mandatory: bool = False
-    exclusion_if_missed: bool = False  # True → HARD_KO
+    exclusion_if_missed: bool = False
     evidence: Optional[Evidence] = None
 
 class WorksAmounts(BaseModel):
@@ -158,10 +145,10 @@ class WorksAmounts(BaseModel):
     evidence: Optional[Evidence] = None
 
 class PrevalentCategory(BaseModel):
-    category: str                  # "OG1"
+    category: str
     amount_eur: Optional[float] = None
     percentage: Optional[float] = None
-    required_class: str = ""       # "III"
+    required_class: str = ""
     notes: str = ""
     evidence: Optional[Evidence] = None
 
@@ -176,11 +163,11 @@ class ScorporabileCategory(BaseModel):
     evidence: Optional[Evidence] = None
 
 class ParticipationForms(BaseModel):
-    allowed: List[str] = Field(default_factory=list)   # "single","rti","consortium","avvalimento"
+    allowed: List[str] = Field(default_factory=list)
     rti_rules_summary: str = ""
     avvalimento_rules_summary: str = ""
     subcontract_rules_summary: str = ""
-    subcontract_max_pct: Optional[float] = None        # es. 30.0
+    subcontract_max_pct: Optional[float] = None
     avvalimento_excluded_reqs: List[str] = Field(default_factory=list)
     evidence: Optional[Evidence] = None
 
@@ -192,13 +179,13 @@ class DesignRequirements(BaseModel):
     evidence: Optional[Evidence] = None
 
 class ProceduralKiller(BaseModel):
-    pktype: str          # "site_visit_mandatory" | "anac_fee_required" | "passoe_required"
+    pktype: str
     is_mandatory: bool = False
     deadline: Optional[str] = None
     evidence: Optional[Evidence] = None
 
 class ExecutionConstraint(BaseModel):
-    ectype: str          # "start_by_date" | "building_occupied" | "night_work_only"
+    ectype: str
     date: Optional[str] = None
     hardness: Literal["hard", "soft"] = "soft"
     description: str = ""
@@ -210,7 +197,6 @@ class ExtractionConfidence(BaseModel):
     missing_sections: List[str] = Field(default_factory=list)
 
 class TenderProfile(BaseModel):
-    # Metadati
     title: str = ""
     contracting_authority: str = ""
     cig: str = ""
@@ -218,52 +204,30 @@ class TenderProfile(BaseModel):
     procedure_type: str = ""
     platform: str = ""
     lots: int = 1
-
-    # Scadenze
     deadlines: List[Deadline] = Field(default_factory=list)
-
-    # Importi
     amounts: WorksAmounts = Field(default_factory=WorksAmounts)
-
-    # Categorie lavori
     prevalent_category: Optional[PrevalentCategory] = None
     scorporabili: List[ScorporabileCategory] = Field(default_factory=list)
-
-    # Partecipazione
     participation_forms: ParticipationForms = Field(default_factory=ParticipationForms)
-
-    # Requisiti speciali
     certifications_required: List[str] = Field(default_factory=list)
     min_turnover_eur: Optional[float] = None
     min_sector_turnover_eur: Optional[float] = None
-
-    # Progettazione
     design_requirements: DesignRequirements = Field(default_factory=DesignRequirements)
-
-    # Gate procedurali
     procedural_killers: List[ProceduralKiller] = Field(default_factory=list)
     anac_fee_required: Literal["yes", "no", "unknown"] = "unknown"
-
-    # Vincoli esecutivi
     execution_constraints: List[ExecutionConstraint] = Field(default_factory=list)
-
-    # Garanzie
     provvisoria_required: Literal["yes", "no", "unknown"] = "unknown"
     provvisoria_amount_eur: Optional[float] = None
     provvisoria_pct: Optional[float] = None
-
-    # Geo
     comune: str = ""
     provincia: str = ""
     regione: str = ""
     luogo_esecuzione: str = ""
-
-    # Confidence
     extraction_confidence: ExtractionConfidence = Field(default_factory=ExtractionConfidence)
 
 
 # ══════════════════════════════════════════════════════════
-# DECISION REPORT  (output finale)
+# DECISION REPORT
 # ══════════════════════════════════════════════════════════
 
 class Fixability(BaseModel):
@@ -279,7 +243,7 @@ class CompanyGap(BaseModel):
 class RequirementResult(BaseModel):
     req_id: str
     name: str
-    category: str           # "qualification" | "procedural" | "financial" | "design" | "operational"
+    category: str
     status: ReqStatus
     severity: Severity
     fixability: Fixability = Field(default_factory=Fixability)
@@ -304,7 +268,7 @@ class ActionStep(BaseModel):
     evidence: List[Evidence] = Field(default_factory=list)
 
 class ActionPlan(BaseModel):
-    recommended_path: str = "none"  # "avvalimento"|"rti"|"subappalto"|"progettisti"|"none"
+    recommended_path: str = "none"
     steps: List[ActionStep] = Field(default_factory=list)
 
 class ProceduralCheckItem(BaseModel):
@@ -362,12 +326,11 @@ class DecisionReport(BaseModel):
     uncertainties: List[Uncertainty] = Field(default_factory=list)
     audit_trace: List[AuditEntry] = Field(default_factory=list)
     generated_at: str = ""
-    tender_profile: Optional[TenderProfile] = None   # embedded for export
+    tender_profile: Optional[TenderProfile] = None
 
 
 # ══════════════════════════════════════════════════════════
-# LEGACY: BandoRequisiti usato dall'estrazione LLM
-# Manteniamo compatibilità col parser esistente
+# LEGACY: BandoRequisiti — schema usato dall'estrazione LLM
 # ══════════════════════════════════════════════════════════
 
 class Scadenza(BaseModel):
@@ -384,7 +347,8 @@ class SOACategoria(BaseModel):
     descrizione: str = ""
     classifica: str
     prevalente: bool = False
-    importo_categoria: Optional[float] = None
+    importo_categoria: Optional[float] = None   # importo specifico della categoria (non totale appalto)
+    inferred: bool = False                        # NEW v3.1: True se categoria identificata per inferenza
     evidence: Optional[str] = None
 
 class FiguraProfessionale(BaseModel):
@@ -438,7 +402,7 @@ class BandoRequisiti(BaseModel):
     vincoli_speciali: List[str] = Field(default_factory=list)
     garanzie_richieste: Optional[Garanzie] = None
 
-    # NUOVI CAMPI v3.0
+    # CAMPI v3.0
     sopralluogo_obbligatorio: bool = False
     sopralluogo_evidence: Optional[str] = None
     anac_contributo_richiesto: Literal["yes", "no", "unknown"] = "unknown"
@@ -456,6 +420,16 @@ class BandoRequisiti(BaseModel):
     piattaforma_gara: Optional[str] = None
     fatturato_minimo_richiesto: Optional[float] = None
     fatturato_specifico_richiesto: Optional[float] = None
+
+    # NUOVI CAMPI v3.1 — Manodopera
+    costi_manodopera_indicati: bool = False
+    costi_manodopera_eur: Optional[float] = None
+    costi_manodopera_soggetti_ribasso: bool = False
+    costi_manodopera_evidence: Optional[str] = None
+
+    # NUOVI CAMPI v3.1 — Divieto subappalto per categoria
+    subappalto_vietato_categorie: List[str] = Field(default_factory=list)
+    subappalto_vietato_evidence: Optional[str] = None
 
     class Config:
         validate_assignment = True
