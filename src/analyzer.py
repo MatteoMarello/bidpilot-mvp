@@ -1,302 +1,326 @@
 """
-Analyzer ANTI-ALLUCINAZIONE con Structured Output Pydantic
-Versione pulita e ottimizzata
+BidPilot v3.0 — Analyzer
+Orchestratore: PDF → BandoRequisiti → CompanyProfile → DecisionReport
 """
+from __future__ import annotations
 import json
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Tuple, Optional
+from datetime import datetime
+from typing import Dict, Any, Optional
+
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 
-from src.schemas import BandoRequisiti
+from src.schemas import BandoRequisiti, CompanyProfile, SOAAttestation, Certification
+from src.schemas import TurnoverEntry, SectorTurnoverEntry, SimilarWork, Designer, StaffRole
+from src.schemas import LegalRepresentative, CameralRegistration, DecisionReport
 from src.prompts import EXTRACTION_SYSTEM_PROMPT, EXTRACTION_USER_PROMPT
+from src.decision_engine import produce_decision_report
 
 
-# Classifiche SOA → Importo massimo gestibile
-CLASSIFICHE_SOA = {
-    "I": 258_000, "II": 516_000, "III": 1_033_000, "IV": 2_065_000,
-    "V": 3_098_000, "VI": 5_165_000, "VII": 10_329_000, "VIII": float('inf')
-}
-
-# Mapping comuni principali → regioni (per validazione anti-allucinazione)
+# Mapping comuni → regioni per validazione geografica
 GEO_VALIDATION = {
     "roma": "lazio", "milano": "lombardia", "torino": "piemonte",
     "napoli": "campania", "palermo": "sicilia", "genova": "liguria",
-    "bologna": "emilia-romagna", "firenze": "toscana", "bari": "puglia"
+    "bologna": "emilia-romagna", "firenze": "toscana", "bari": "puglia",
+    "venezia": "veneto", "verona": "veneto", "padova": "veneto",
+    "trieste": "friuli-venezia giulia", "trento": "trentino",
+    "perugia": "umbria", "ancona": "marche", "cagliari": "sardegna",
+    "catania": "sicilia", "messina": "sicilia"
 }
 
 
 class BandoAnalyzer:
-    """Analizzatore bandi con structured output e validazione anti-allucinazione"""
+    """
+    Analizzatore bandi v3.0 con decision engine a 4 stati.
     
-    def __init__(self, openai_api_key: str, profilo_path: str = "config/profilo_azienda.json"):
+    Flusso:
+      1. Estrazione strutturata dal testo (LLM → BandoRequisiti)
+      2. Validazione anti-allucinazione geografica
+      3. Build CompanyProfile dal JSON di configurazione
+      4. Decision engine deterministico → DecisionReport
+    """
+
+    def __init__(self, openai_api_key: str,
+                 profilo_path: str = "config/profilo_azienda.json"):
         self.llm = ChatOpenAI(
             model="gpt-4o-mini",
             temperature=0,
             api_key=openai_api_key
         )
-        
-        with open(profilo_path, 'r', encoding='utf-8') as f:
-            self.profilo = json.load(f)
-    
+        with open(profilo_path, "r", encoding="utf-8") as f:
+            self._raw_profile = json.load(f)
+
+    # ──────────────────────────────────────────────────────
+    # 1. Estrazione dal PDF
+    # ──────────────────────────────────────────────────────
+
     def extract_requirements(self, bando_text: str) -> BandoRequisiti:
-        """Estrae requisiti usando structured output Pydantic"""
-        # GPT-4o gestisce ~400k caratteri (128k token).
-        # NON troncare a 50k - i requisiti SOA/certificazioni sono spesso
-        # nelle pagine centrali del bando (pag. 20-35) e verrebbero persi.
-        # Limite alzato a 300k per coprire bandi anche di 200+ pagine.
+        """Estrae struttura BandoRequisiti usando GPT-4o-mini con structured output."""
         MAX_LENGTH = 300_000
         if len(bando_text) > MAX_LENGTH:
             half = MAX_LENGTH // 2
-            bando_text = bando_text[:half] + "\n\n[...TRONCATO - DOC. MOLTO LUNGO...]\n\n" + bando_text[-half:]
-        
+            bando_text = (
+                bando_text[:half]
+                + "\n\n[...DOCUMENTO TRONCATO — SEZIONE CENTRALE OMESSA...]\n\n"
+                + bando_text[-half:]
+            )
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", EXTRACTION_SYSTEM_PROMPT),
-            ("user", EXTRACTION_USER_PROMPT)
+            ("user", EXTRACTION_USER_PROMPT),
         ])
-        
         structured_llm = self.llm.with_structured_output(BandoRequisiti)
         chain = prompt | structured_llm
-        
+
         try:
-            requisiti = chain.invoke({"bando_text": bando_text})
-            self._validate_extraction(requisiti)
+            requisiti: BandoRequisiti = chain.invoke({"bando_text": bando_text})
+            self._validate_geo(requisiti)
             return requisiti
         except Exception as e:
-            raise Exception(f"Errore estrazione: {str(e)}")
-    
-    def _validate_extraction(self, req: BandoRequisiti) -> None:
-        """Validazione geografica anti-allucinazione"""
+            raise RuntimeError(f"Errore estrazione bando: {e}") from e
+
+    def _validate_geo(self, req: BandoRequisiti) -> None:
+        """Blocca incoerenze geografiche (anti-allucinazione)."""
         if req.comune_stazione_appaltante and req.regione_stazione_appaltante:
-            comune = req.comune_stazione_appaltante.lower()
-            regione = req.regione_stazione_appaltante.lower()
-            
+            comune = req.comune_stazione_appaltante.lower().strip()
+            regione = req.regione_stazione_appaltante.lower().strip()
             expected = GEO_VALIDATION.get(comune)
             if expected and expected not in regione:
                 raise ValueError(
-                    f"INCOERENZA GEOGRAFICA: Comune '{req.comune_stazione_appaltante}' "
+                    f"INCOERENZA GEOGRAFICA: comune '{req.comune_stazione_appaltante}' "
                     f"non può essere in regione '{req.regione_stazione_appaltante}'"
                 )
-        
-        # Importo ragionevole
-        if req.importo_lavori and req.importo_lavori > 100_000_000:
-            print(f"⚠️ Importo molto alto: €{req.importo_lavori:,.0f}")
-    
-    def _calcola_urgenza(self, data_str: str) -> Tuple[str, Optional[int], str]:
-        """Calcola urgenza scadenza"""
-        try:
-            data = datetime.strptime(data_str, "%Y-%m-%d")
-            giorni = (data - datetime.now()).days
-            
-            if giorni < 0:   return "SCADUTO", giorni, "⛔"
-            if giorni <= 2:  return "CRITICO", giorni, "🔴"
-            if giorni <= 7:  return "ATTENZIONE", giorni, "🟡"
-            return "OK", giorni, "🟢"
-        except:
-            return "SCONOSCIUTO", None, "❓"
-    
-    def _check_geografico(self, comune: str, provincia: str, regione: str) -> Dict:
-        """Verifica zona geografica"""
-        aree = self.profilo.get("aree_geografiche", [])
-        if not aree:
-            return {"in_zona": True, "motivo": "Aree non specificate", "warning": False}
-        
-        regione_norm = (regione or "").strip().title()
-        if any(regione_norm in area for area in aree):
-            return {
-                "in_zona": True,
-                "motivo": f"Bando in {regione_norm}, area abituale",
-                "warning": False
-            }
-        
-        return {
-            "in_zona": False,
-            "motivo": f"Bando in {regione_norm} - Fuori aree abituali ({', '.join(aree)})",
-            "warning": True
-        }
-    
-    def _verifica_soa(self, soa_richiesta) -> Dict:
-        """Verifica SOA con calcolo gap"""
-        cat_req = soa_richiesta.categoria
-        class_req = soa_richiesta.classifica
-        
-        for soa in self.profilo.get("soa_possedute", []):
-            if soa["categoria"] != cat_req:
+
+    # ──────────────────────────────────────────────────────
+    # 2. Build CompanyProfile da JSON
+    # ──────────────────────────────────────────────────────
+
+    def _build_company_profile(self) -> CompanyProfile:
+        """Converte il JSON di configurazione in CompanyProfile strutturato."""
+        raw = self._raw_profile
+
+        # SOA
+        soa_list = []
+        for s in raw.get("soa_possedute", []):
+            soa_list.append(SOAAttestation(
+                category=s.get("categoria", ""),
+                soa_class=s.get("classifica", ""),
+                expiry_date=s.get("scadenza", ""),
+                issue_date=s.get("data_emissione", ""),
+                notes=s.get("note", "")
+            ))
+
+        # Certificazioni
+        cert_list = []
+        for c in raw.get("certificazioni", []):
+            tipo = c.get("tipo", "")
+            if tipo.upper() in ("SOA",):  # non è una cert ISO
                 continue
-            
-            class_map = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8}
-            poss = class_map.get(soa["classifica"], 0)
-            rich = class_map.get(class_req, 0)
-            
-            if poss >= rich:
-                return {
-                    "status": "VERDE",
-                    "motivo": f"SOA {cat_req} Classifica {soa['classifica']} presente (scad. {soa['scadenza']})"
-                }
-            else:
-                gap = CLASSIFICHE_SOA.get(class_req, 0) - CLASSIFICHE_SOA.get(soa["classifica"], 0)
-                return {
-                    "status": "ROSSO",
-                    "motivo": f"SOA {cat_req} presente ma mancano €{gap:,} per Classifica {class_req}",
-                    "suggerimento": "Valutare AVVALIMENTO con impresa di classifica superiore"
-                }
-        
-        return {
-            "status": "ROSSO",
-            "motivo": f"SOA {cat_req} Classifica {class_req} NON posseduta",
-            "suggerimento": "Ricorrere ad AVVALIMENTO con impresa che possiede SOA richiesta"
-        }
-    
-    def _verifica_certificazione(self, cert_req: str) -> Dict:
-        """Verifica certificazione"""
-        for cert in self.profilo.get("certificazioni", []):
-            tipo = cert.get("tipo", "")
-            if tipo.lower() in cert_req.lower() or cert_req.lower() in tipo.lower():
-                # Check scadenza
-                if scad := cert.get("scadenza"):
-                    try:
-                        if datetime.strptime(scad, "%Y-%m-%d") < datetime.now():
-                            return {
-                                "status": "ROSSO",
-                                "motivo": f"{tipo} SCADUTA il {scad} - RINNOVARE"
-                            }
-                    except:
-                        pass
-                
-                return {"status": "VERDE", "motivo": f"{tipo} presente"}
-        
-        return {
-            "status": "GIALLO",
-            "motivo": f"{cert_req} - Verificare con fornitore",
-            "suggerimento": "Contattare ente certificatore"
-        }
-    
-    def _verifica_figura(self, figura) -> Dict:
-        """Verifica figura professionale"""
-        ruolo = figura.ruolo
-        
-        if ruolo in self.profilo.get("figure_professionali_interne", []):
-            return {"status": "VERDE", "motivo": f"{ruolo} disponibile internamente"}
-        
-        for collab in self.profilo.get("collaboratori_esterni_abituali", []):
-            if ruolo.lower() in collab["tipo"].lower():
-                return {
-                    "status": "GIALLO",
-                    "motivo": f"{ruolo} - Contattare {collab['nome_studio']} (€{collab['costo_medio']:,})",
-                    "costo_stimato": collab["costo_medio"]
-                }
-        
-        return {
-            "status": "GIALLO",
-            "motivo": f"{ruolo} - Cercare consulente esterno",
-            "suggerimento": "Contattare ordini professionali"
-        }
-    
-    def _calcola_score(self, soa_an, cert_an, fig_an, scad_an, geo) -> Tuple[str, int, List[str]]:
-        """Calcola score e decisione"""
-        rossi = len(soa_an["rossi"]) + len(cert_an["rossi"])
-        gialli = len(soa_an["gialli"]) + len(cert_an["gialli"]) + len(fig_an["gialli"])
-        verdi = len(soa_an["verdi"]) + len(cert_an["verdi"]) + len(fig_an["verdi"])
-        
-        score = 100
-        motivi = []
-        
-        if rossi > 0:
-            score -= rossi * 40
-            soa_manc = [s["categoria"] for s in soa_an["rossi"]]
-            if soa_manc:
-                motivi.append(f"❌ SOA MANCANTI: {', '.join(soa_manc)} (-{len(soa_an['rossi'])*40}pt)")
-        
-        if crit := len(scad_an["critiche"]):
-            score -= crit * 20
-            motivi.append(f"🔴 {crit} scadenza/e CRITICA/E (-{crit*20}pt)")
-        
-        if gialli > 0:
-            score -= gialli * 10
-            motivi.append(f"🟡 {gialli} requisiti DA VERIFICARE (-{gialli*10}pt)")
-        
-        if not geo["in_zona"]:
-            score -= 15
-            motivi.append("🗺️ Bando FUORI ZONA (-15pt)")
-        
-        bonus = min(20, verdi * 5)
-        if bonus:
-            score += bonus
-            motivi.append(f"✅ {verdi} requisiti POSSEDUTI (+{bonus}pt)")
-        
-        score = max(0, min(100, score))
-        
-        if score < 40:
-            decisione = "NON PARTECIPARE"
-        elif score < 65:
-            decisione = "PARTECIPARE CON CAUTELA"
-        else:
-            decisione = "PARTECIPARE"
-        
-        return decisione, score, motivi
-    
-    def analyze_bando(self, bando_text: str) -> Dict[str, Any]:
-        """Analisi completa bando"""
-        # Estrazione strutturata
-        req = self.extract_requirements(bando_text)
-        
-        # Check geografico
-        geo = self._check_geografico(
-            req.comune_stazione_appaltante,
-            req.provincia_stazione_appaltante,
-            req.regione_stazione_appaltante
+            cert_list.append(Certification(
+                cert_type=tipo,
+                valid=True,
+                scope=c.get("descrizione", ""),
+                expiry_date=c.get("scadenza", "")
+            ))
+
+        # Fatturati
+        turnover = []
+        sector_turnover = []
+        fat = raw.get("fatturato", {})
+        for year_key, data in fat.items():
+            try:
+                y = int(year_key.replace("anno_", ""))
+            except Exception:
+                continue
+            totale = data.get("totale", 0)
+            turnover.append(TurnoverEntry(year=y, amount_eur=totale))
+            settore_principale = raw.get("settore_principale", "")
+            for k, v in data.items():
+                if k != "totale" and isinstance(v, (int, float)):
+                    sector_turnover.append(SectorTurnoverEntry(year=y, sector=k, amount_eur=v))
+
+        # Rappresentante legale
+        lr = raw.get("legale_rappresentante", {})
+        legal_rep = LegalRepresentative(
+            name=lr.get("nome", raw.get("nome_azienda", "")),
+            role=lr.get("ruolo", "Legale Rappresentante"),
+            has_digital_signature=lr.get("firma_digitale", True),
+            signing_powers_proof=lr.get("poteri_firma", "available")
         )
-        
-        # Analizza scadenze
-        scad = {"critiche": [], "prossime": [], "ok": [], "scadute": []}
-        for s in req.scadenze:
-            if s.data:
-                liv, giorni, emoji = self._calcola_urgenza(s.data)
-                info = {
-                    "tipo": s.tipo, "data": s.data, "ora": s.ora,
-                    "note": s.note, "livello": liv, "giorni_mancanti": giorni, "emoji": emoji
-                }
-                if liv == "SCADUTO":
-                    scad["scadute"].append(info)   # già passate: info ma NO penalità
-                elif liv == "CRITICO":
-                    scad["critiche"].append(info)  # ≤2 giorni: urgente
-                elif liv == "ATTENZIONE":
-                    scad["prossime"].append(info)
-                else:
-                    scad["ok"].append(info)
-        
-        # Analizza SOA
-        soa = {"verdi": [], "gialli": [], "rossi": []}
-        for s in req.soa_richieste:
-            ver = self._verifica_soa(s)
-            info = {"categoria": s.categoria, "descrizione": s.descrizione, "classifica": s.classifica, **ver}
-            soa["rossi" if ver["status"] == "ROSSO" else "verdi"].append(info)
-        
-        # Analizza certificazioni
-        cert = {"verdi": [], "gialli": [], "rossi": []}
-        for c in req.certificazioni_richieste:
-            ver = self._verifica_certificazione(c)
-            info = {"tipo": c, **ver}
-            cert[ver["status"].lower() + "i"].append(info)
-        
-        # Analizza figure
-        fig = {"verdi": [], "gialli": [], "rossi": []}
-        for f in req.figure_professionali_richieste:
-            ver = self._verifica_figura(f)
-            info = {"ruolo": f.ruolo, **ver}
-            fig["gialli" if ver["status"] == "GIALLO" else "verdi"].append(info)
-        
-        # Calcola decisione
-        decisione, punteggio, motivi = self._calcola_score(soa, cert, fig, scad, geo)
-        
+
+        # CCIAA
+        cciaa_data = raw.get("cciaa", {})
+        cameral = CameralRegistration(
+            is_registered=cciaa_data.get("iscritta", True),
+            rea_number=cciaa_data.get("rea", ""),
+            ateco_codes=cciaa_data.get("ateco", []),
+            business_scope_text=raw.get("settore_principale", ""),
+            coherence_with_tender_object="unknown"
+        )
+
+        # Figure chiave
+        key_roles = []
+        for f in raw.get("figure_professionali_interne", []):
+            key_roles.append(StaffRole(role=f, available=True))
+
+        # Progettisti
+        design_team = []
+        for d in raw.get("progettisti", []):
+            design_team.append(Designer(
+                name=d.get("nome", ""),
+                profession=d.get("professione", ""),
+                order_registration=d.get("albo", "unknown"),
+                license_date=d.get("data_abilitazione", ""),
+                young_professional=d.get("giovane_professionista", "unknown")
+            ))
+
+        return CompanyProfile(
+            legal_name=raw.get("nome_azienda", ""),
+            registered_office=raw.get("sede", ""),
+            soa_attestations=soa_list,
+            certifications=cert_list,
+            turnover_by_year=sorted(turnover, key=lambda x: x.year, reverse=True),
+            sector_turnover_by_year=sorted(sector_turnover, key=lambda x: x.year, reverse=True),
+            legal_representative=legal_rep,
+            cameral_registration=cameral,
+            key_roles=key_roles,
+            design_team=design_team,
+            has_inhouse_design=raw.get("progettazione_interna", False),
+            external_designers_available="yes" if design_team else "unknown",
+            willing_rti=raw.get("partecipazione", {}).get("rti", True),
+            willing_avvalimento=raw.get("partecipazione", {}).get("avvalimento", True),
+            willing_subcontract=raw.get("partecipazione", {}).get("subappalto", True),
+            operating_regions=raw.get("aree_geografiche", []),
+            start_date_constraints=raw.get("vincoli_inizio_lavori", ""),
+            bank_references_available="unknown",
+            cel_records_available="unknown",
+        )
+
+    # ──────────────────────────────────────────────────────
+    # 3. Entry point principale
+    # ──────────────────────────────────────────────────────
+
+    def analyze_bando(self, bando_text: str) -> Dict[str, Any]:
+        """
+        Pipeline completa:
+          bando_text → BandoRequisiti → DecisionReport (v3.0)
+
+        Restituisce dict con:
+          - decision_report: DecisionReport
+          - requisiti_estratti: dict (raw BandoRequisiti)
+          - company_profile: dict (CompanyProfile)
+          - legacy: dict compatibilità UI v2
+        """
+        # Estrazione
+        bando = self.extract_requirements(bando_text)
+
+        # Profilo aziendale
+        company = self._build_company_profile()
+
+        # Decision engine
+        report: DecisionReport = produce_decision_report(bando, company)
+
+        # Compatibilità legacy per UI
+        legacy = self._build_legacy(bando, company, report)
+
         return {
-            "requisiti_estratti": req.model_dump(),
+            "decision_report": report,
+            "requisiti_estratti": bando.model_dump(),
+            "company_profile": company.model_dump(),
+            "legacy": legacy,
+        }
+
+    def _build_legacy(self, bando: BandoRequisiti,
+                      company: CompanyProfile,
+                      report: DecisionReport) -> Dict[str, Any]:
+        """Costruisce struttura legacy per retrocompatibilità con la UI v2."""
+        # Check geografico
+        in_zona = False
+        if bando.regione_stazione_appaltante:
+            regione_norm = bando.regione_stazione_appaltante.strip().title()
+            in_zona = any(regione_norm in area for area in company.operating_regions)
+        
+        geo = {
+            "in_zona": in_zona,
+            "motivo": (
+                f"Bando in {bando.regione_stazione_appaltante or '?'}"
+                + (", area operativa ✓" if in_zona else " — FUORI aree abituali")
+            ),
+            "warning": not in_zona and bool(bando.regione_stazione_appaltante)
+        }
+
+        # Scadenze legacy
+        from src.requirements_engine import _parse_date, _today
+        scad_dict = {"critiche": [], "prossime": [], "ok": [], "scadute": []}
+        for sc in bando.scadenze:
+            if not sc.data:
+                continue
+            d = _parse_date(sc.data)
+            if d is None:
+                continue
+            giorni = (d - _today()).days
+            info = {
+                "tipo": sc.tipo, "data": sc.data, "ora": sc.ora,
+                "note": sc.note, "giorni_mancanti": giorni
+            }
+            if giorni < 0:
+                scad_dict["scadute"].append(info)
+            elif giorni <= 2:
+                scad_dict["critiche"].append(info)
+            elif giorni <= 7:
+                scad_dict["prossime"].append(info)
+            else:
+                scad_dict["ok"].append(info)
+
+        # SOA legacy (da requirements_results)
+        from src.schemas import ReqStatus, Severity
+        soa_v = {"verdi": [], "gialli": [], "rossi": []}
+        cert_v = {"verdi": [], "gialli": [], "rossi": []}
+        fig_v = {"verdi": [], "gialli": [], "rossi": []}
+
+        for r in report.requirements_results:
+            if r.req_id.startswith("C") and "SOA" in r.name:
+                item = {"categoria": r.name, "motivo": r.user_message, **r.fixability.model_dump()}
+                if r.status == ReqStatus.OK:
+                    soa_v["verdi"].append(item)
+                elif r.status in (ReqStatus.KO, ReqStatus.FIXABLE):
+                    soa_v["rossi"].append(item)
+            elif r.req_id.startswith("D"):
+                item = {"tipo": r.name, "motivo": r.user_message}
+                if r.status == ReqStatus.OK:
+                    cert_v["verdi"].append(item)
+                elif r.status == ReqStatus.KO:
+                    cert_v["rossi"].append(item)
+                else:
+                    cert_v["gialli"].append(item)
+
+        # Mappa verdetto → legacy
+        verdict_map = {
+            "GO": "PARTECIPARE",
+            "GO_HIGH_RISK": "PARTECIPARE CON CAUTELA",
+            "GO_WITH_STRUCTURE": "PARTECIPARE CON STRUTTURA",
+            "NO_GO": "NON PARTECIPARE"
+        }
+        legacy_dec = verdict_map.get(report.verdict.status.value, "PARTECIPARE CON CAUTELA")
+
+        # Score secondario (per barra progresso)
+        ko_count = sum(1 for r in report.requirements_results
+                       if r.status == ReqStatus.KO and r.severity == Severity.HARD_KO)
+        fix_count = sum(1 for r in report.requirements_results
+                        if r.status == ReqStatus.FIXABLE)
+        ok_count = sum(1 for r in report.requirements_results
+                       if r.status == ReqStatus.OK)
+        total = len(report.requirements_results) or 1
+        score_sec = max(0, min(100, int(100 * ok_count / total) - ko_count * 20))
+
+        return {
+            "requisiti_estratti": bando.model_dump(),
             "check_geografico": geo,
-            "scadenze": scad,
-            "soa": soa,
-            "certificazioni": cert,
-            "figure_professionali": fig,
-            "decisione": decisione,
-            "punteggio_fattibilita": punteggio,
-            "motivi_punteggio": motivi
+            "scadenze": scad_dict,
+            "soa": soa_v,
+            "certificazioni": cert_v,
+            "figure_professionali": fig_v,
+            "decisione": legacy_dec,
+            "punteggio_fattibilita": score_sec,
+            "motivi_punteggio": [r.message for r in report.top_reasons],
         }

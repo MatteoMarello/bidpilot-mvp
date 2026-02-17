@@ -1,37 +1,53 @@
 {
   "nome_azienda": "Ossola Impianti S.r.l.",
   "sede": "Torino, Italia",
-  "settore_principale": "Impianti elettrici e fotovoltaici",
-  
+  "settore_principale": "Impianti elettrici, fotovoltaici e termici",
+
   "aree_geografiche": ["Piemonte", "Valle d'Aosta", "Lombardia"],
-  
+
   "importi_gara": {
     "minimo_interesse": 50000,
     "massimo_gestibile": 2000000,
     "sweet_spot": [200000, 1000000]
   },
-  
+
+  "legale_rappresentante": {
+    "nome": "Mario Rossi",
+    "ruolo": "Amministratore Unico",
+    "firma_digitale": true,
+    "poteri_firma": "available"
+  },
+
+  "cciaa": {
+    "iscritta": true,
+    "rea": "TO-123456",
+    "ateco": ["43.21.01", "35.11.00", "43.22.02"]
+  },
+
   "soa_possedute": [
     {
       "categoria": "OS6",
-      "descrizione": "Impianti fotovoltaici",
+      "descrizione": "Impianti fotovoltaici e a pannelli solari",
       "classifica": "III",
-      "scadenza": "2026-09-15"
+      "scadenza": "2026-09-15",
+      "data_emissione": "2023-09-15"
     },
     {
       "categoria": "OS28",
-      "descrizione": "Impianti termici e condizionamento",
+      "descrizione": "Impianti termici e di condizionamento",
       "classifica": "II",
-      "scadenza": "2026-09-15"
+      "scadenza": "2026-09-15",
+      "data_emissione": "2023-09-15"
     },
     {
       "categoria": "OS30",
       "descrizione": "Impianti antincendio",
       "classifica": "II",
-      "scadenza": "2026-09-15"
+      "scadenza": "2026-09-15",
+      "data_emissione": "2023-09-15"
     }
   ],
-  
+
   "certificazioni": [
     {
       "tipo": "ISO 14001",
@@ -41,45 +57,59 @@
     },
     {
       "tipo": "ISO 9001",
-      "descrizione": "Qualità",
+      "descrizione": "Sistemi di gestione qualità",
       "data_rilascio": "2024-06-01",
       "scadenza": "2027-06-01"
-    },
-    {
-      "tipo": "SOA",
-      "descrizione": "Attestazione organismi accreditati",
-      "data_rilascio": "2023-09-15",
-      "scadenza": "2026-09-15"
     }
   ],
-  
+
   "fatturato": {
     "anno_2024": {
       "totale": 2100000,
-      "categoria_OS6": 1200000,
-      "categoria_OS28": 600000,
-      "categoria_OS30": 300000
+      "settore_OS6": 1200000,
+      "settore_OS28": 600000,
+      "settore_OS30": 300000
     },
     "anno_2023": {
       "totale": 1850000,
-      "categoria_OS6": 1000000,
-      "categoria_OS28": 550000,
-      "categoria_OS30": 300000
+      "settore_OS6": 1000000,
+      "settore_OS28": 550000,
+      "settore_OS30": 300000
     },
     "anno_2022": {
       "totale": 1600000,
-      "categoria_OS6": 900000,
-      "categoria_OS28": 450000,
-      "categoria_OS30": 250000
+      "settore_OS6": 900000,
+      "settore_OS28": 450000,
+      "settore_OS30": 250000
     }
   },
-  
+
   "figure_professionali_interne": [
     "Ingegnere elettrico",
     "Perito elettrotecnico",
     "Project Manager certificato"
   ],
-  
+
+  "progettazione_interna": false,
+
+  "progettisti": [
+    {
+      "nome": "Studio Tecnico Bianchi",
+      "professione": "ingegnere",
+      "albo": "yes",
+      "data_abilitazione": "2015-03-10",
+      "giovane_professionista": "no"
+    }
+  ],
+
+  "partecipazione": {
+    "rti": true,
+    "avvalimento": true,
+    "subappalto": true
+  },
+
+  "vincoli_inizio_lavori": "",
+
   "collaboratori_esterni_abituali": [
     {
       "tipo": "Geologo abilitato",

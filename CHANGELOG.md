@@ -1,111 +1,143 @@
-# 🔄 CHANGELOG - BidPilot v2.0 Clean
+# 🔄 CHANGELOG — BidPilot v3.0 Decision Engine
 
-## ✅ MODIFICHE EFFETTUATE
+## ✅ MODIFICHE PRINCIPALI
 
-### 1. **requirements.txt** - AGGIORNATO
-- ✅ Versioni dipendenze modernizzate
-- ✅ Rimosso `python-docx` (non usato)
-- ✅ Aggiornato LangChain 0.1.20 (da 0.1.0)
-- ✅ Aggiornato OpenAI 1.30.0 (da 1.6.1)
-- ✅ Aggiornato Pydantic 2.7.1 (da 2.5.3)
+### Output: da "scoring" a decisione a 4 stati
 
-### 2. **src/analyzer.py** - RIPULITO
-- ✅ Rimosso codice ridondante (500+ righe → 350 righe)
-- ✅ Semplificati metodi di verifica
-- ✅ Mapping comuni-regioni più pulito
-- ✅ Eliminata dipendenza da `langchain_compat.py`
-- ✅ Import diretto `langchain_openai`
-- ✅ Logica score più leggibile
+Prima: punteggio 0-100 → "PARTECIPARE / NON PARTECIPARE"
 
-### 3. **src/prompts.py** - SEMPLIFICATO
-- ✅ Prompt da 200 righe → 60 righe
-- ✅ Rimossa verbosità eccessiva
-- ✅ Mantenuta efficacia anti-allucinazione
-- ✅ Istruzioni più concise
+Ora: 4 stati deterministici
+- **NO_GO** — requisiti bloccanti non colmabili
+- **GO_WITH_STRUCTURE** — colmabile con RTI / avvalimento / progettisti
+- **GO_HIGH_RISK** — ammissibile ma con rischi operativi/documentali
+- **GO** — tutti i requisiti verificati, nessun blocco
 
-### 4. **app.py** - OTTIMIZZATO
-- ✅ CSS da 450 righe → 80 righe
-- ✅ Rimossi stili ridondanti
-- ✅ Logica UI più pulita
-- ✅ Funzioni render semplificate
-- ✅ Import diretti (no compat layer)
+### Nuovi file
 
-### 5. **src/parser.py** - MIGLIORATO
-- ✅ Codice più leggibile
-- ✅ Gestione errori migliorata
-- ✅ Rimossi metodi inutilizzati
+| File | Descrizione |
+|------|-------------|
+| `src/requirements_engine.py` | Libreria requisiti atomici A1–M7 con logica di valutazione |
+| `src/decision_engine.py` | Engine decisionale deterministico → DecisionReport |
 
-### 6. **src/rag_engine.py** - PULITO
-- ✅ Import diretti OpenAI
-- ✅ Codice più conciso
-- ✅ Rimossa logica ridondante
+### File modificati
 
-### 7. **test_installation.py** - SEMPLIFICATO
-- ✅ Test più concisi
-- ✅ Output più chiaro
-- ✅ Rimossi check ridondanti
+| File | Modifiche |
+|------|-----------|
+| `src/schemas.py` | Nuovi schemi: CompanyProfile, TenderProfile, DecisionReport + legacy BandoRequisiti |
+| `src/analyzer.py` | Orchestratore aggiornato: usa decision_engine invece di scoring |
+| `src/prompts.py` | Prompt aggiornati con nuovi campi (sopralluogo, avvalimento, RTI, appalto integrato…) |
+| `app.py` | UI completamente rinnovata con 4 tab: Requisiti / Piano d'Azione / Checklist / Rischi |
+| `config/profilo_azienda.json` | Aggiunto legale_rappresentante, cciaa, partecipazione, progettisti |
 
-### 8. **README.md** - RISCRITTO
-- ✅ Conciso e professionale
-- ✅ Quick start chiaro
-- ✅ Troubleshooting essenziale
-- ✅ Rimossa documentazione eccessiva
+---
 
-## ❌ FILE ELIMINATI
+## 🧱 Architettura v3.0
 
-**Documentazione ridondante:**
-- ❌ `INDEX.md` - Info duplicate in README
-- ❌ `INSTRUCTIONS.md` - Troppo verboso
-- ❌ `QUICKSTART.md` - Integrato in README
-- ❌ `ISTRUZIONI_RAPIDE.md` - Non necessario
-- ❌ `DEMO_CHECKLIST.md` - Troppo specifico
-- ❌ `ESEMPIO_FUNZIONE_COMPLETA.md` - Obsoleto
-- ❌ `README_MODIFICHE.md` - Sostituito da CHANGELOG
-- ❌ `TECHNICAL_NOTES.md` - Troppo dettagliato per MVP
+```
+PDF
+ │
+ ▼
+BandoParser.parse_pdf()
+ │
+ ▼
+BandoAnalyzer.extract_requirements()  ←── LLM (GPT-4o-mini)
+ │  → BandoRequisiti (Pydantic structured output)
+ │
+ ▼
+BandoAnalyzer._build_company_profile()
+ │  → CompanyProfile (da profilo_azienda.json)
+ │
+ ▼
+requirements_engine.evaluate_all(bando, company)
+ │  → List[RequirementResult]  (A1…M7, deterministici)
+ │
+ ▼
+decision_engine.produce_decision_report(bando, company)
+ │  → DecisionReport
+ │     ├── Verdict (4 stati)
+ │     ├── TopReasons (max 3, con evidenze)
+ │     ├── RequirementsResults (tutti i req atomici)
+ │     ├── ActionPlan (step concreti per colmare gap)
+ │     ├── ProceduralChecklist
+ │     ├── DocumentChecklist
+ │     ├── RiskRegister
+ │     ├── Uncertainties (domande per l'utente)
+ │     └── AuditTrace
+```
 
-**Codice eliminato:**
-- ❌ `src/langchain_compat.py` - Non più necessario
+---
 
-## 📊 RISULTATI
+## 📋 Requisiti Atomici Implementati
 
-### Linee di Codice
-- **Prima:** ~3,500 righe totali
-- **Dopo:** ~1,800 righe totali
-- **Riduzione:** 48% 🎉
+### A — Generali
+A1 Cause esclusione · A2 Patti integrità · A5 Regolarità fiscale
 
-### File Progetto
-- **Prima:** 22 file
-- **Dopo:** 13 file
-- **Riduzione:** 41% 🎉
+### B — Idoneità
+B1 Iscrizione CCIAA · B4 Firma digitale/poteri
 
-### Documentazione
-- **Prima:** 8 file MD (15,000 parole)
-- **Dopo:** 1 file MD + CHANGELOG (2,500 parole)
-- **Riduzione:** 83% 🎉
+### C — SOA
+C1 Prevalente · C2 Scorporabili · C5 Validità temporale
 
-## 🚀 BENEFICI
+### D — Certificazioni
+D1-Dn per ogni certificazione richiesta dal bando
 
-1. **Manutenibilità:** Codice più facile da leggere e modificare
-2. **Performance:** Meno import, meno overhead
-3. **Onboarding:** Documentazione concisa e chiara
-4. **Debugging:** Meno codice = meno bug potenziali
-5. **Dipendenze:** Versioni aggiornate e compatibili
+### E — Economico-finanziari
+E1 Fatturato globale · E2 Fatturato specifico
 
-## ⚠️ BREAKING CHANGES
+### G — Progettazione
+G1 Appalto integrato · G4 Giovane professionista
 
-**Nessuno!** Il codice è completamente compatibile.
+### H — Gate procedurali (priorità massima)
+H1 Sopralluogo · H4 ANAC contributo · H5 Piattaforma
 
-## 📝 TODO (Opzionale)
+### I — Garanzie
+I1 Cauzione provvisoria
 
-- [ ] Aggiungere tests unitari (pytest)
-- [ ] Implementare logging strutturato
-- [ ] Aggiungere CI/CD pipeline
-- [ ] Dockerizzare applicazione
+### K — Avvalimento
+K1 Ammissibilità e regole
 
-## 🎯 Versione Finale
+### L — Subappalto
+L1 Limiti percentuali
 
-**BidPilot v2.0 Clean**
-- Codice pulito ✅
-- Documentazione concisa ✅
-- Dipendenze aggiornate ✅
-- Pronto per produzione ✅
+### M — Operativi
+M1 Inizio lavori tassativo · M2+ Vincoli esecutivi
+
+---
+
+## 🏗️ Sanabilità (per ogni KO)
+
+I KO "colmabili" propongono automaticamente metodi ammessi dal bando:
+- **avvalimento** — solo se bando lo ammette e con vincoli estratti
+- **rti** — solo se bando lo ammette, con quote
+- **subappalto** — nei limiti percentuali estratti dal bando
+- **progettisti** — solo per appalto integrato
+
+---
+
+## 🔐 Anti-allucinazione v3.0
+
+- Ogni requisito/KO ha `evidence` (quote + page + section)
+- Se manca evidenza → status `UNKNOWN`, mai `KO`
+- Validazione geografica blocca incoerenze (Roma → Lazio)
+- Incertezze esplicite nell'output (campo `uncertainties`)
+- AuditTrace completo per ogni decisione
+
+---
+
+## ⚠️ Breaking Changes
+
+**CompanyProfile**: il JSON `profilo_azienda.json` ha nuovi campi obbligatori:
+- `legale_rappresentante` (nome, ruolo, firma_digitale)
+- `cciaa` (iscritta, rea, ateco)
+- `partecipazione` (rti, avvalimento, subappalto)
+
+Vedere `config/profilo_azienda.json` per il formato aggiornato.
+
+---
+
+## 📝 TODO
+
+- [ ] Completare requisiti atomici F (CEL/referenze), J (RTI consorzi), K esteso
+- [ ] Export PDF/Word del DecisionReport
+- [ ] Multi-lotto (gestione lotti separati)
+- [ ] Modulo bozze offerta tecnica (WIP)
