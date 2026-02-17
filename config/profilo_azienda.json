@@ -2,13 +2,15 @@
   "nome_azienda": "Ossola Impianti S.r.l.",
   "sede": "Torino, Italia",
   "settore_principale": "Impianti elettrici e fotovoltaici",
+  
   "aree_geografiche": ["Piemonte", "Valle d'Aosta", "Lombardia"],
+  
   "importi_gara": {
-      "minimo_interesse": 50000,
-      "massimo_gestibile": 2000000,
-      "sweet_spot": [200000, 1000000]
-    },
-      
+    "minimo_interesse": 50000,
+    "massimo_gestibile": 2000000,
+    "sweet_spot": [200000, 1000000]
+  },
+  
   "soa_possedute": [
     {
       "categoria": "OS6",
@@ -18,7 +20,7 @@
     },
     {
       "categoria": "OS28",
-      "descrizione": "Impianti termici e di condizionamento",
+      "descrizione": "Impianti termici e condizionamento",
       "classifica": "II",
       "scadenza": "2026-09-15"
     },
@@ -45,7 +47,7 @@
     },
     {
       "tipo": "SOA",
-      "descrizione": "Attestazione Organismi Accreditati",
+      "descrizione": "Attestazione organismi accreditati",
       "data_rilascio": "2023-09-15",
       "scadenza": "2026-09-15"
     }
@@ -72,8 +74,6 @@
     }
   },
   
-  "aree_geografiche": ["Piemonte", "Valle d'Aosta", "Lombardia"],
-  
   "figure_professionali_interne": [
     "Ingegnere elettrico",
     "Perito elettrotecnico",
@@ -93,11 +93,5 @@
       "ultimo_utilizzo": "2024-02-10",
       "costo_medio": 3500
     }
-  ],
-  
-  "importi_gara": {
-    "minimo_interesse": 50000,
-    "massimo_gestibile": 2000000,
-    "sweet_spot": [200000, 1000000]
-  }
+  ]
 }

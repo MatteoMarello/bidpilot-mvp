@@ -1,163 +1,99 @@
 #!/usr/bin/env python3
-"""
-Script di test per verificare l'installazione di BidPilot MVP
-Esegui con: python test_installation.py
-"""
+"""Script test installazione BidPilot MVP"""
 import sys
 import os
 
+
 def test_imports():
-    """Test import di tutti i moduli necessari"""
+    """Test import moduli"""
     print("🧪 Testing imports...\n")
     
-    tests = [
+    modules = [
         ("Streamlit", "streamlit"),
         ("LangChain", "langchain"),
-        ("LangChain Community", "langchain_community"),
+        ("LangChain OpenAI", "langchain_openai"),
         ("ChromaDB", "chromadb"),
-        ("PyPDF", "pypdf"),
+        ("PDF Processing", "pdfplumber"),
         ("OpenAI", "openai"),
         ("Pydantic", "pydantic"),
     ]
     
     failed = []
     
-    for name, module in tests:
+    for name, module in modules:
         try:
             __import__(module)
-            print(f"✅ {name}: OK")
+            print(f"✅ {name}")
         except ImportError as e:
-            print(f"❌ {name}: FAILED - {str(e)}")
+            print(f"❌ {name}: {e}")
             failed.append(name)
-
-    # Compatibilità LangChain OpenAI: nuovo package oppure API legacy in langchain
-    has_langchain_openai = False
-    try:
-        __import__("langchain_openai")
-        has_langchain_openai = True
-        print("✅ LangChain OpenAI: OK (package langchain_openai)")
-    except ImportError:
-        try:
-            from langchain.chat_models import ChatOpenAI  # noqa: F401
-            print("✅ LangChain OpenAI: OK (fallback legacy in langchain.chat_models)")
-            has_langchain_openai = True
-        except ImportError:
-            try:
-                from langchain_community.chat_models import ChatOpenAI  # noqa: F401
-                print("✅ LangChain OpenAI: OK (fallback in langchain_community.chat_models)")
-                has_langchain_openai = True
-            except ImportError as e:
-                print(f"❌ LangChain OpenAI: FAILED - {str(e)}")
-
-    if not has_langchain_openai:
-        failed.append("LangChain OpenAI")
     
     print()
     
     if failed:
-        print(f"❌ {len(failed)} moduli mancanti. Esegui: pip install -r requirements.txt")
+        print(f"❌ {len(failed)} moduli mancanti. Eseguire: pip install -r requirements.txt")
         return False
-    else:
-        print("✅ Tutti i moduli installati correttamente!")
-        return True
+    
+    print("✅ Tutti i moduli installati!")
+    return True
 
-def test_project_structure():
-    """Test struttura directory del progetto"""
-    print("\n🧪 Testing project structure...\n")
+
+def test_structure():
+    """Test struttura progetto"""
+    print("🧪 Testing structure...\n")
     
-    required_dirs = [
-        "config",
-        "src",
-        "data/progetti_storici",
-    ]
-    
-    required_files = [
+    required = [
         "config/profilo_azienda.json",
         "src/parser.py",
         "src/analyzer.py",
-        "src/rag_engine.py",
+        "src/schemas.py",
         "src/prompts.py",
         "app.py",
         "requirements.txt",
     ]
     
-    missing_dirs = []
-    missing_files = []
+    missing = []
     
-    for dir_path in required_dirs:
-        if not os.path.exists(dir_path):
-            print(f"❌ Directory mancante: {dir_path}")
-            missing_dirs.append(dir_path)
+    for path in required:
+        if os.path.exists(path):
+            print(f"✅ {path}")
         else:
-            print(f"✅ Directory: {dir_path}")
-    
-    for file_path in required_files:
-        if not os.path.exists(file_path):
-            print(f"❌ File mancante: {file_path}")
-            missing_files.append(file_path)
-        else:
-            print(f"✅ File: {file_path}")
+            print(f"❌ {path}")
+            missing.append(path)
     
     print()
     
-    if missing_dirs or missing_files:
-        print(f"❌ Struttura incompleta: {len(missing_dirs)} dir, {len(missing_files)} file mancanti")
+    if missing:
+        print(f"❌ {len(missing)} file mancanti")
         return False
-    else:
-        print("✅ Struttura progetto completa!")
-        return True
+    
+    print("✅ Struttura completa!")
+    return True
 
-def test_profilo_aziendale():
-    """Test caricamento profilo aziendale"""
-    print("\n🧪 Testing profilo aziendale...\n")
+
+def test_profilo():
+    """Test profilo aziendale"""
+    print("🧪 Testing profilo...\n")
     
     try:
         import json
-        with open("config/profilo_azienda.json", 'r', encoding='utf-8') as f:
-            profilo = json.load(f)
+        with open("config/profilo_azienda.json") as f:
+            prof = json.load(f)
         
-        required_keys = ["nome_azienda", "soa_possedute", "certificazioni", "fatturato"]
-        
-        for key in required_keys:
-            if key in profilo:
-                print(f"✅ Campo '{key}': presente")
+        for key in ["nome_azienda", "soa_possedute", "certificazioni"]:
+            if key in prof:
+                print(f"✅ Campo '{key}'")
             else:
-                print(f"❌ Campo '{key}': mancante")
+                print(f"❌ Campo '{key}' mancante")
                 return False
         
-        print(f"\n✅ Profilo aziendale valido per: {profilo['nome_azienda']}")
-        print(f"   - SOA: {len(profilo.get('soa_possedute', []))}")
-        print(f"   - Certificazioni: {len(profilo.get('certificazioni', []))}")
+        print(f"\n✅ Profilo valido: {prof['nome_azienda']}")
         return True
         
     except Exception as e:
-        print(f"❌ Errore nel caricamento profilo: {str(e)}")
+        print(f"❌ Errore: {e}")
         return False
 
-def test_progetti_storici():
-    """Test presenza progetti storici"""
-    print("\n🧪 Testing progetti storici...\n")
-    
-    progetti_dir = "data/progetti_storici"
-    
-    if not os.path.exists(progetti_dir):
-        print(f"⚠️  Directory {progetti_dir} non trovata")
-        return False
-    
-    pdf_files = [f for f in os.listdir(progetti_dir) if f.endswith('.pdf')]
-    
-    if not pdf_files:
-        print(f"⚠️  Nessun PDF trovato in {progetti_dir}")
-        print("   Questo è OK per test iniziali, ma serve per generazione bozze.")
-        print("   Aggiungi PDF in questa cartella e riindicizza dalla app.")
-        return True
-    else:
-        print(f"✅ Trovati {len(pdf_files)} PDF in {progetti_dir}:")
-        for pdf in pdf_files[:5]:  # Mostra max 5
-            print(f"   - {pdf}")
-        if len(pdf_files) > 5:
-            print(f"   ... e altri {len(pdf_files) - 5}")
-        return True
 
 def main():
     """Esegui tutti i test"""
@@ -165,37 +101,35 @@ def main():
     print("🚀 BidPilot MVP - Installation Test")
     print("=" * 60)
     
-    results = []
-    
-    results.append(("Imports", test_imports()))
-    results.append(("Project Structure", test_project_structure()))
-    results.append(("Profilo Aziendale", test_profilo_aziendale()))
-    results.append(("Progetti Storici", test_progetti_storici()))
+    results = [
+        ("Imports", test_imports()),
+        ("Structure", test_structure()),
+        ("Profilo", test_profilo())
+    ]
     
     print("\n" + "=" * 60)
-    print("📊 TEST SUMMARY")
+    print("📊 SUMMARY")
     print("=" * 60)
     
-    for name, result in results:
-        status = "✅ PASS" if result else "❌ FAIL"
-        print(f"{status}: {name}")
-    
-    all_passed = all(r[1] for r in results[:3])  # Progetti storici opzionale
+    for name, ok in results:
+        print(f"{'✅' if ok else '❌'} {name}")
     
     print("\n" + "=" * 60)
-    if all_passed:
-        print("🎉 Installazione completata con successo!")
+    
+    if all(r[1] for r in results):
+        print("🎉 Installazione OK!")
         print("\nProssimi passi:")
-        print("1. Esegui: streamlit run app.py")
-        print("2. Inserisci OpenAI API Key nella sidebar")
-        print("3. (Opzionale) Aggiungi PDF in data/progetti_storici/")
-        print("4. Carica un bando e inizia ad analizzare!")
+        print("1. streamlit run app.py")
+        print("2. Inserire API Key nella sidebar")
+        print("3. Caricare PDF e analizzare")
     else:
-        print("❌ Alcuni test hanno fallito. Controlla gli errori sopra.")
-        print("\nPer risolvere:")
+        print("❌ Alcuni test falliti")
+        print("\nSoluzioni:")
         print("1. pip install -r requirements.txt")
-        print("2. Verifica che tutti i file siano presenti")
+        print("2. Verificare file mancanti")
+    
     print("=" * 60)
+
 
 if __name__ == "__main__":
     main()

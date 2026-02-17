@@ -1,179 +1,120 @@
-"""
-RAG Engine per generazione bozze offerte tecniche
-Recupera contenuti da progetti storici e genera bozze
-"""
+"""RAG Engine per generazione bozze offerte tecniche"""
 import os
 from typing import List, Dict, Any
-from src.langchain_compat import create_chat_openai, create_openai_embeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 
 from src.prompts import GENERATION_PROMPT
 
 
 class RAGEngine:
-    """Engine RAG per recupero e generazione contenuti"""
+    """Engine RAG per recupero e generazione contenuti da progetti storici"""
     
     def __init__(self, openai_api_key: str, progetti_dir: str = "data/progetti_storici"):
-        self.openai_api_key = openai_api_key
+        self.api_key = openai_api_key
         self.progetti_dir = progetti_dir
         
-        self.llm = create_chat_openai(
-            model="gpt-4o",
-            temperature=0.3,
-            api_key=openai_api_key
-        )
+        self.llm = ChatOpenAI(model="gpt-4o", temperature=0.3, api_key=openai_api_key)
+        self.embeddings = OpenAIEmbeddings(api_key=openai_api_key)
         
-        self.embeddings = create_openai_embeddings(api_key=openai_api_key)
-        
-        self.text_splitter = RecursiveCharacterTextSplitter(
+        self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
-            separators=["\n\n", "\n", ". ", "! ", "? ", ", ", " ", ""]
+            separators=["\n\n", "\n", ". ", " "]
         )
         
         self.vectorstore = None
-        self.progetti_metadata = []
+        self.metadata = []
     
     def ingest_progetti(self, force_rebuild: bool = False) -> None:
-        """
-        Indicizza tutti i PDF dei progetti storici in ChromaDB
+        """Indicizza PDF progetti in ChromaDB"""
+        persist_dir = "data/chroma_db"
         
-        Args:
-            force_rebuild: se True, ricrea l'indice da zero
-        """
-        persist_directory = "data/chroma_db"
-        
-        # Se esiste già e non forziamo rebuild, carica
-        if os.path.exists(persist_directory) and not force_rebuild:
-            print(f"📚 Caricamento database esistente da {persist_directory}...")
-            self.vectorstore = Chroma(
-                persist_directory=persist_directory,
-                embedding_function=self.embeddings
-            )
+        # Carica esistente se disponibile
+        if os.path.exists(persist_dir) and not force_rebuild:
+            print(f"📚 Caricamento DB da {persist_dir}...")
+            self.vectorstore = Chroma(persist_directory=persist_dir, embedding_function=self.embeddings)
             return
         
-        print("📚 Indicizzazione progetti storici in corso...")
+        print("📚 Indicizzazione progetti...")
         
-        documents = []
-        
-        # Carica tutti i PDF dalla cartella progetti
         if not os.path.exists(self.progetti_dir):
             os.makedirs(self.progetti_dir)
-            print(f"⚠️  Cartella {self.progetti_dir} creata. Inserire PDF dei progetti storici.")
+            print(f"⚠️ Cartella {self.progetti_dir} creata. Inserire PDF progetti.")
             return
         
         pdf_files = [f for f in os.listdir(self.progetti_dir) if f.endswith('.pdf')]
         
         if not pdf_files:
-            print(f"⚠️  Nessun PDF trovato in {self.progetti_dir}. Inserire progetti storici.")
+            print(f"⚠️ Nessun PDF in {self.progetti_dir}")
             return
         
-        for pdf_file in pdf_files:
-            pdf_path = os.path.join(self.progetti_dir, pdf_file)
-            print(f"  - Processando {pdf_file}...")
+        documents = []
+        
+        for pdf in pdf_files:
+            path = os.path.join(self.progetti_dir, pdf)
+            print(f"  - {pdf}...")
             
             try:
-                loader = PyPDFLoader(pdf_path)
+                loader = PyPDFLoader(path)
                 pages = loader.load()
                 
-                # Aggiungi metadata
                 for page in pages:
-                    page.metadata["source"] = pdf_file
-                    page.metadata["progetto"] = pdf_file.replace(".pdf", "")
+                    page.metadata["source"] = pdf
+                    page.metadata["progetto"] = pdf.replace(".pdf", "")
                 
                 documents.extend(pages)
-                
-                # Salva metadata del progetto
-                self.progetti_metadata.append({
-                    "nome_file": pdf_file,
-                    "progetto": pdf_file.replace(".pdf", ""),
-                    "num_pagine": len(pages)
-                })
+                self.metadata.append({"nome": pdf, "progetto": pdf.replace(".pdf", ""), "pagine": len(pages)})
                 
             except Exception as e:
-                print(f"    ⚠️  Errore nel caricamento di {pdf_file}: {str(e)}")
+                print(f"    ⚠️ Errore: {e}")
         
         if not documents:
-            print("⚠️  Nessun documento caricato correttamente.")
+            print("⚠️ Nessun documento caricato")
             return
         
-        # Chunka i documenti
-        print(f"✂️  Chunking di {len(documents)} pagine...")
-        chunks = self.text_splitter.split_documents(documents)
-        print(f"✅ Creati {len(chunks)} chunks")
+        print(f"✂️ Chunking {len(documents)} pagine...")
+        chunks = self.splitter.split_documents(documents)
+        print(f"✅ {len(chunks)} chunks creati")
         
-        # Crea vectorstore
-        print("🔮 Creazione embeddings e vectorstore...")
+        print("🔮 Creazione embeddings...")
         self.vectorstore = Chroma.from_documents(
             documents=chunks,
             embedding=self.embeddings,
-            persist_directory=persist_directory
+            persist_directory=persist_dir
         )
         
-        print(f"✅ Database creato con successo! {len(chunks)} chunks indicizzati.")
+        print(f"✅ DB creato! {len(chunks)} chunks indicizzati")
     
-    def search_relevant_content(self, query: str, k: int = 5, filter_dict: Dict = None) -> List[Dict[str, Any]]:
-        """
-        Cerca contenuti semanticamente rilevanti
-        
-        Args:
-            query: testo di ricerca
-            k: numero di risultati
-            filter_dict: filtri metadata opzionali
-            
-        Returns:
-            lista di risultati con contenuto e metadata
-        """
+    def search_content(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Cerca contenuti rilevanti"""
         if not self.vectorstore:
-            raise Exception("Vectorstore non inizializzato. Eseguire ingest_progetti() prima.")
+            raise Exception("Vectorstore non inizializzato. Eseguire ingest_progetti()")
         
-        # Ricerca semantica
-        if filter_dict:
-            results = self.vectorstore.similarity_search(query, k=k, filter=filter_dict)
-        else:
-            results = self.vectorstore.similarity_search(query, k=k)
+        results = self.vectorstore.similarity_search(query, k=k)
         
-        # Formatta risultati
-        formatted_results = []
-        for doc in results:
-            formatted_results.append({
-                "contenuto": doc.page_content,
-                "progetto": doc.metadata.get("progetto", "Sconosciuto"),
-                "source": doc.metadata.get("source", ""),
-                "page": doc.metadata.get("page", 0)
-            })
-        
-        return formatted_results
+        return [{
+            "contenuto": doc.page_content,
+            "progetto": doc.metadata.get("progetto", "Sconosciuto"),
+            "source": doc.metadata.get("source", ""),
+            "page": doc.metadata.get("page", 0)
+        } for doc in results]
     
-    def generate_draft(self, criterio: Dict[str, Any], progetti_context: List[Dict] = None) -> str:
-        """
-        Genera bozza offerta tecnica per un criterio specifico
+    def generate_draft(self, criterio: Dict[str, Any], context: List[Dict] = None) -> str:
+        """Genera bozza offerta per criterio"""
+        desc = criterio.get("descrizione", "")
+        punti = criterio.get("punteggio_max", 0)
         
-        Args:
-            criterio: dict con descrizione e punteggio del criterio
-            progetti_context: contenuti rilevanti dai progetti (opzionale, altrimenti cerca automaticamente)
-            
-        Returns:
-            testo della bozza generata
-        """
-        criterio_desc = criterio.get("descrizione", "")
-        punteggio_max = criterio.get("punteggio_max", 0)
+        if not context:
+            context = self.search_content(f"{desc} soluzioni tecniche", k=5)
         
-        # Se non forniti, cerca contenuti rilevanti
-        if not progetti_context:
-            query = f"{criterio_desc} soluzioni tecniche implementate"
-            progetti_context = self.search_relevant_content(query, k=5)
+        progetti_text = ""
+        for i, p in enumerate(context, 1):
+            progetti_text += f"\n--- PROGETTO {i}: {p['progetto']} ---\n{p['contenuto'][:800]}...\n"
         
-        # Formatta progetti per il prompt
-        progetti_formatted = ""
-        for i, prog in enumerate(progetti_context, 1):
-            progetti_formatted += f"\n\n--- PROGETTO {i}: {prog['progetto']} ---\n"
-            progetti_formatted += f"Contenuto: {prog['contenuto'][:800]}...\n"
-        
-        # Genera bozza
         prompt = PromptTemplate(
             template=GENERATION_PROMPT,
             input_variables=["criterio_descrizione", "punteggio_max", "progetti_rilevanti"]
@@ -182,20 +123,20 @@ class RAGEngine:
         chain = prompt | self.llm
         
         response = chain.invoke({
-            "criterio_descrizione": criterio_desc,
-            "punteggio_max": punteggio_max,
-            "progetti_rilevanti": progetti_formatted
+            "criterio_descrizione": desc,
+            "punteggio_max": punti,
+            "progetti_rilevanti": progetti_text
         })
         
         return response.content.strip()
     
-    def get_progetti_stats(self) -> Dict:
-        """Ritorna statistiche sui progetti indicizzati"""
+    def get_stats(self) -> Dict:
+        """Statistiche progetti indicizzati"""
         if not self.vectorstore:
             return {"status": "non_inizializzato"}
         
         return {
             "status": "attivo",
-            "num_progetti": len(self.progetti_metadata),
-            "progetti": [p["progetto"] for p in self.progetti_metadata]
+            "num_progetti": len(self.metadata),
+            "progetti": [p["progetto"] for p in self.metadata]
         }
