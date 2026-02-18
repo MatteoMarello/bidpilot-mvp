@@ -129,6 +129,17 @@ class BandoAnalyzer:
                 if k != "totale" and isinstance(v, (int, float)):
                     sector_turnover.append(SectorTurnoverEntry(year=y, sector=k, amount_eur=v))
 
+        # BUG FIX: Load similar_works from profilo (needed for R21)
+        similar_works = []
+        for w in raw.get("opere_analoghe", []):
+            similar_works.append(SimilarWork(
+                title=w.get("titolo", ""),
+                year=w.get("anno", 0),
+                amount_eur=float(w.get("importo", 0)),
+                categories=w.get("categorie", []),
+                client=w.get("committente", "")
+            ))
+
         lr = raw.get("legale_rappresentante", {})
         legal_rep = LegalRepresentative(
             name=lr.get("nome", raw.get("nome_azienda", "")),
@@ -160,6 +171,11 @@ class BandoAnalyzer:
             for d in raw.get("progettisti", [])
         ]
 
+        # BUG FIX: load credit_license_requested and has_credit_license
+        patente = raw.get("patente_crediti", "unknown")
+        has_credit = patente if patente in ("yes", "no", "unknown") else "unknown"
+        credit_requested = patente == "yes"
+
         return CompanyProfile(
             legal_name=raw.get("nome_azienda", ""),
             registered_office=raw.get("sede", ""),
@@ -167,6 +183,7 @@ class BandoAnalyzer:
             certifications=cert_list,
             turnover_by_year=sorted(turnover, key=lambda x: x.year, reverse=True),
             sector_turnover_by_year=sorted(sector_turnover, key=lambda x: x.year, reverse=True),
+            similar_works=similar_works,  # FIX: was missing
             legal_representative=legal_rep,
             cameral_registration=cameral,
             key_roles=key_roles,
@@ -179,7 +196,8 @@ class BandoAnalyzer:
             operating_regions=raw.get("aree_geografiche", []),
             start_date_constraints=raw.get("vincoli_inizio_lavori", ""),
             ccnl_applied=raw.get("ccnl_applicato", ""),
-            has_credit_license=raw.get("patente_crediti", "unknown"),
+            has_credit_license=has_credit,  # FIX: was not loaded
+            credit_license_requested=credit_requested,  # FIX: was not loaded
             deposited_statements_count=raw.get("bilanci_depositati", 0),
         )
 
@@ -216,7 +234,6 @@ class BandoAnalyzer:
             "warning": not in_zona and bool(bando.regione_stazione_appaltante)
         }
 
-        # Scadenze legacy
         from src.requirements_engine import _parse_date, _today
         scad_dict: Dict[str, list] = {"critiche": [], "prossime": [], "ok": [], "scadute": []}
         for sc in bando.scadenze:
@@ -255,7 +272,6 @@ class BandoAnalyzer:
         }
         legacy_dec = verdict_map.get(report.verdict.status.value, "PARTECIPARE CON CAUTELA")
 
-        # Nota engine mode
         engine_note = ""
         if report.engine_mode == "qualificazione":
             engine_note = f"⚙️ Engine QUALIFICAZIONE attivato ({bando.qualification_system_owner or 'N/D'})"

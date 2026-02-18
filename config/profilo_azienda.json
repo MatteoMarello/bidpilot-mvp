@@ -1,18 +1,18 @@
 {
-  "nome_azienda": "Ossola Impianti S.r.l.",
-  "sede": "Torino, Italia",
-  "settore_principale": "Impianti elettrici, fotovoltaici e termici",
+  "nome_azienda": "Elettra Costruzioni S.r.l.",
+  "sede": "Torino (TO), Italia",
+  "settore_principale": "Impianti elettrici, fotovoltaici, termici e antincendio",
 
-  "aree_geografiche": ["Piemonte", "Valle d'Aosta", "Lombardia"],
+  "aree_geografiche": ["Piemonte", "Valle d'Aosta", "Lombardia", "Liguria"],
 
   "importi_gara": {
-    "minimo_interesse": 50000,
-    "massimo_gestibile": 2000000,
-    "sweet_spot": [200000, 1000000]
+    "minimo_interesse": 80000,
+    "massimo_gestibile": 2500000,
+    "sweet_spot": [300000, 1200000]
   },
 
   "legale_rappresentante": {
-    "nome": "Mario Rossi",
+    "nome": "Giovanni Ferretti",
     "ruolo": "Amministratore Unico",
     "firma_digitale": true,
     "poteri_firma": "available"
@@ -20,85 +20,155 @@
 
   "cciaa": {
     "iscritta": true,
-    "rea": "TO-123456",
-    "ateco": ["43.21.01", "35.11.00", "43.22.02"]
+    "rea": "TO-987654",
+    "ateco": ["43.21.01", "43.21.09", "35.11.00", "43.22.02", "43.22.01"]
   },
 
   "soa_possedute": [
     {
+      "categoria": "OG1",
+      "descrizione": "Edifici civili e industriali",
+      "classifica": "II",
+      "scadenza": "2027-04-20",
+      "data_emissione": "2024-04-20"
+    },
+    {
       "categoria": "OS6",
-      "descrizione": "Impianti fotovoltaici e a pannelli solari",
+      "descrizione": "Fibre ottiche e cablaggio strutturato",
       "classifica": "III",
-      "scadenza": "2026-09-15",
-      "data_emissione": "2023-09-15"
+      "scadenza": "2027-04-20",
+      "data_emissione": "2024-04-20"
     },
     {
       "categoria": "OS28",
       "descrizione": "Impianti termici e di condizionamento",
-      "classifica": "II",
-      "scadenza": "2026-09-15",
-      "data_emissione": "2023-09-15"
+      "classifica": "III",
+      "scadenza": "2027-04-20",
+      "data_emissione": "2024-04-20"
     },
     {
       "categoria": "OS30",
       "descrizione": "Impianti antincendio",
       "classifica": "II",
-      "scadenza": "2026-09-15",
-      "data_emissione": "2023-09-15"
+      "scadenza": "2027-04-20",
+      "data_emissione": "2024-04-20"
+    },
+    {
+      "categoria": "OS35",
+      "descrizione": "Interventi a basso impatto ambientale",
+      "classifica": "II",
+      "scadenza": "2027-04-20",
+      "data_emissione": "2024-04-20"
     }
   ],
 
   "certificazioni": [
     {
-      "tipo": "ISO 14001",
-      "descrizione": "Gestione ambientale",
-      "data_rilascio": "2025-01-15",
-      "scadenza": "2028-01-15"
-    },
-    {
       "tipo": "ISO 9001",
       "descrizione": "Sistemi di gestione qualità",
-      "data_rilascio": "2024-06-01",
-      "scadenza": "2027-06-01"
+      "data_rilascio": "2023-03-15",
+      "scadenza": "2026-03-15"
+    },
+    {
+      "tipo": "ISO 14001",
+      "descrizione": "Sistemi di gestione ambientale",
+      "data_rilascio": "2023-03-15",
+      "scadenza": "2026-03-15"
+    },
+    {
+      "tipo": "ISO 45001",
+      "descrizione": "Sistemi di gestione salute e sicurezza sul lavoro",
+      "data_rilascio": "2023-03-15",
+      "scadenza": "2026-03-15"
     }
   ],
 
   "fatturato": {
     "anno_2024": {
-      "totale": 2100000,
-      "settore_OS6": 1200000,
-      "settore_OS28": 600000,
-      "settore_OS30": 300000
+      "totale": 3200000,
+      "settore_OG1": 480000,
+      "settore_OS6": 1450000,
+      "settore_OS28": 780000,
+      "settore_OS30": 490000
     },
     "anno_2023": {
-      "totale": 1850000,
-      "settore_OS6": 1000000,
-      "settore_OS28": 550000,
-      "settore_OS30": 300000
+      "totale": 2750000,
+      "settore_OG1": 320000,
+      "settore_OS6": 1260000,
+      "settore_OS28": 710000,
+      "settore_OS30": 460000
     },
     "anno_2022": {
-      "totale": 1600000,
-      "settore_OS6": 900000,
-      "settore_OS28": 450000,
-      "settore_OS30": 250000
+      "totale": 2200000,
+      "settore_OG1": 280000,
+      "settore_OS6": 990000,
+      "settore_OS28": 580000,
+      "settore_OS30": 350000
     }
   },
 
+  "opere_analoghe": [
+    {
+      "titolo": "Impianto fotovoltaico Comune di Cuneo",
+      "committente": "Comune di Cuneo",
+      "anno": 2023,
+      "importo": 420000,
+      "categorie": ["OS6"]
+    },
+    {
+      "titolo": "Rifacimento impianti termici Scuola Media Rivoli",
+      "committente": "Città di Rivoli",
+      "anno": 2022,
+      "importo": 310000,
+      "categorie": ["OS28"]
+    },
+    {
+      "titolo": "Impianto antincendio Polo Industriale Moncalieri",
+      "committente": "Consorzio ASI Moncalieri",
+      "anno": 2023,
+      "importo": 185000,
+      "categorie": ["OS30"]
+    },
+    {
+      "titolo": "Efficientamento energetico edificio comunale Asti",
+      "committente": "Comune di Asti",
+      "anno": 2024,
+      "importo": 560000,
+      "categorie": ["OS6", "OS28"]
+    },
+    {
+      "titolo": "Ristrutturazione impianti istituto scolastico Alessandria",
+      "committente": "Provincia di Alessandria",
+      "anno": 2022,
+      "importo": 890000,
+      "categorie": ["OG1", "OS28", "OS30"]
+    }
+  ],
+
   "figure_professionali_interne": [
     "Ingegnere elettrico",
+    "Ingegnere termotecnico",
     "Perito elettrotecnico",
-    "Project Manager certificato"
+    "Project Manager PMP",
+    "RSPP (Responsabile Sicurezza)"
   ],
 
   "progettazione_interna": false,
 
   "progettisti": [
     {
-      "nome": "Studio Tecnico Bianchi",
+      "nome": "Ing. Marco Bernini",
       "professione": "ingegnere",
       "albo": "yes",
-      "data_abilitazione": "2015-03-10",
+      "data_abilitazione": "2012-06-15",
       "giovane_professionista": "no"
+    },
+    {
+      "nome": "Ing. Sara Longo",
+      "professione": "ingegnere",
+      "albo": "yes",
+      "data_abilitazione": "2020-11-10",
+      "giovane_professionista": "yes"
     }
   ],
 
@@ -108,20 +178,25 @@
     "subappalto": true
   },
 
+  "patente_crediti": "yes",
+  "bilanci_depositati": 3,
+
+  "ccnl_applicato": "CCNL Edilizia Industria",
+
   "vincoli_inizio_lavori": "",
 
   "collaboratori_esterni_abituali": [
     {
       "tipo": "Geologo abilitato",
-      "nome_studio": "Studio Geologia Rossi",
-      "ultimo_utilizzo": "2023-11-15",
-      "costo_medio": 2800
+      "nome_studio": "Studio Geotecnica Alpi S.r.l.",
+      "ultimo_utilizzo": "2024-03-10",
+      "costo_medio": 3200
     },
     {
       "tipo": "Architetto energetico",
-      "nome_studio": "Studio Efficienza Energetica Bianchi",
-      "ultimo_utilizzo": "2024-02-10",
-      "costo_medio": 3500
+      "nome_studio": "Studio A&E Torino",
+      "ultimo_utilizzo": "2024-01-22",
+      "costo_medio": 4100
     }
   ]
 }
