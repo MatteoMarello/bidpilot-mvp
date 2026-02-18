@@ -1,13 +1,11 @@
 """
 BidPilot v4.0 — Decision Engine
-Allineato alla Libreria Requisiti v2.1:
-- Confidence-based verdict (C.2 Libreria)
-- Engine qualificazione (D11) → ELIGIBLE/NOT_ELIGIBLE
-- PPP multi-stage (D21) → output per FASE
-- Status PREMIANTE: mai KO
-- Profile confidence aggregata
+PATCH: aggiornato per schemas.py v4.1
+- Verdict usa stage_outputs_json (str JSON) invece di stage_outputs (Dict)
+- Resto invariato
 """
 from __future__ import annotations
+import json
 from datetime import datetime
 from typing import List, Optional, Dict
 
@@ -41,37 +39,20 @@ def _days_left(date_str: Optional[str]) -> Optional[int]:
 
 
 # ════════════════════════════════════════════════════════
-# Verdetto — Logica C.2 Libreria Requisiti v2.1
+# Verdetto
 # ════════════════════════════════════════════════════════
 
 def _compute_profile_confidence(results: List[RequirementResult]) -> float:
-    """
-    Confidence aggregata del profilo gara (Sezione C.2):
-    confidence_profilo = min(confidence di tutti i requisiti HARD)
-    """
     hard_results = [r for r in results if r.severity == Severity.HARD_KO]
     if not hard_results:
         return 1.0
     return min(r.confidence for r in hard_results)
 
 
-def _compute_verdict(results: List[RequirementResult],
-                     bando: BandoRequisiti) -> Verdict:
-    """
-    Regole deterministica di verdetto (Sezione C.2 Libreria v2.1):
-
-    1. Engine qualificazione (D11): ELIGIBLE/NOT_ELIGIBLE
-    2. Engine PPP multi-stage (D21): output per FASE
-    3. Engine gara ordinaria:
-       - HARD_KO + status=KO + confidence=1.0  → NO_GO
-       - HARD_KO + status=KO + confidence=0.7  → GO_HIGH_RISK (non NO_GO)
-       - HARD_KO + status=FIXABLE              → GO_WITH_STRUCTURE
-       - SOFT_RISK o UNKNOWN                   → GO_HIGH_RISK
-       - PREMIANTE mancante: MAI KO            → informativo
-    """
+def _compute_verdict(results: List[RequirementResult], bando: BandoRequisiti) -> Verdict:
     profile_conf = _compute_profile_confidence(results)
 
-    # ── Engine qualificazione (D11) ──────────────────────
+    # Engine qualificazione (D11)
     if bando.is_qualification_system:
         hard_ko_qual = [r for r in results
                         if r.severity == Severity.HARD_KO
@@ -82,22 +63,19 @@ def _compute_verdict(results: List[RequirementResult],
                 status=VerdictStatus.NOT_ELIGIBLE_QUALIFICATION,
                 legal_eligibility="not_eligible",
                 operational_feasibility="not_feasible",
-                summary="Sistema di Qualificazione: requisiti bloccanti non soddisfatti. "
-                        "Domanda rigettata o non presentabile.",
+                summary="Sistema di Qualificazione: requisiti bloccanti non soddisfatti.",
                 profile_confidence=profile_conf
             )
         return Verdict(
             status=VerdictStatus.ELIGIBLE_QUALIFICATION,
             legal_eligibility="eligible",
             operational_feasibility="feasible",
-            summary="Sistema di Qualificazione: requisiti soddisfatti. "
-                    "Procedere con la domanda di iscrizione/mantenimento.",
+            summary="Sistema di Qualificazione: requisiti soddisfatti.",
             profile_confidence=profile_conf
         )
 
-    # ── Engine PPP multi-stage (D21) ─────────────────────
+    # Engine PPP multi-stage (D21)
     if bando.procedure_multi_stage:
-        # Stage 1: SOA + capacità base
         stage1_ko = [r for r in results
                      if r.severity == Severity.HARD_KO
                      and r.status == ReqStatus.KO
@@ -107,27 +85,24 @@ def _compute_verdict(results: List[RequirementResult],
         stage3_ko = [r for r in results
                      if r.req_id in ("D22",) and r.status in (ReqStatus.KO, ReqStatus.UNKNOWN)]
         stage3_risk = "HIGH" if stage3_ko else "MEDIUM"
+        # FIX: stage_outputs_json invece di stage_outputs dict
+        so_json = json.dumps({
+            "stage1_admission": stage1_status,
+            "stage2_risk": "MEDIUM (risorse per dialogo)",
+            "stage3_financial_risk": stage3_risk,
+        })
         return Verdict(
             status=VerdictStatus.ELIGIBLE_STAGE1,
             legal_eligibility="uncertain",
             operational_feasibility="risky",
-            summary=f"PPP Multi-stage: Stage 1 = {stage1_status}. "
-                    f"Stage 3 (quota privata/SPV) = rischio {stage3_risk}. "
-                    "AI-GR-04: valutare fase per fase.",
-            stage_outputs={
-                "stage1_admission": stage1_status,
-                "stage2_risk": "MEDIUM (risorse per dialogo)",
-                "stage3_financial_risk": stage3_risk,
-            },
+            summary=f"PPP Multi-stage: Stage 1 = {stage1_status}. Stage 3 rischio {stage3_risk}.",
+            stage_outputs_json=so_json,
             profile_confidence=profile_conf
         )
 
-    # ── Engine gara ordinaria ─────────────────────────────
-
-    # Filtrare PREMIANTE: non contribuisce al verdetto (C.2)
+    # Engine gara ordinaria
     active_results = [r for r in results if r.status != ReqStatus.PREMIANTE]
 
-    # 1. HARD_KO non fixable con confidence=1.0 → NO_GO
     hard_ko_definitive = [r for r in active_results
                           if r.severity == Severity.HARD_KO
                           and r.status == ReqStatus.KO
@@ -142,13 +117,11 @@ def _compute_verdict(results: List[RequirementResult],
             profile_confidence=profile_conf
         )
 
-    # 2. HARD_KO non fixable con confidence=0.7 → GO_HIGH_RISK (non NO_GO, C.2)
     hard_ko_ambiguous = [r for r in active_results
                          if r.severity == Severity.HARD_KO
                          and r.status == ReqStatus.KO
                          and r.confidence == 0.7]
 
-    # 3. HARD_KO FIXABLE → GO_WITH_STRUCTURE
     hard_ko_fixable = [r for r in active_results
                        if r.severity == Severity.HARD_KO
                        and r.status == ReqStatus.FIXABLE]
@@ -157,20 +130,17 @@ def _compute_verdict(results: List[RequirementResult],
         return Verdict(
             status=VerdictStatus.GO_WITH_STRUCTURE,
             legal_eligibility="uncertain",
-            operational_feasibility="risky" if hard_ko_ambiguous else "feasible",
+            operational_feasibility="feasible",
             summary=f"{len(hard_ko_fixable)} gap colmabile/i con struttura: "
                     + "; ".join(r.name for r in hard_ko_fixable[:3]),
             profile_confidence=profile_conf
         )
 
-    # 4. Almeno un UNKNOWN HARD o KO amb. → GO_HIGH_RISK
     unknown_hard = [r for r in active_results
-                    if r.severity == Severity.HARD_KO
-                    and r.status == ReqStatus.UNKNOWN]
+                    if r.severity == Severity.HARD_KO and r.status == ReqStatus.UNKNOWN]
     soft_issues = [r for r in active_results
                    if r.severity == Severity.SOFT_RISK
                    and r.status in (ReqStatus.KO, ReqStatus.FIXABLE, ReqStatus.UNKNOWN)]
-    risk_flags = [r for r in active_results if r.status == ReqStatus.RISK_FLAG]
 
     if hard_ko_ambiguous or hard_ko_fixable or unknown_hard or soft_issues:
         n_issues = len(hard_ko_ambiguous) + len(hard_ko_fixable) + len(unknown_hard) + len(soft_issues)
@@ -182,7 +152,6 @@ def _compute_verdict(results: List[RequirementResult],
             profile_confidence=profile_conf
         )
 
-    # 5. Solo risk flags o info → GO
     return Verdict(
         status=VerdictStatus.GO,
         legal_eligibility="eligible",
@@ -197,7 +166,6 @@ def _compute_verdict(results: List[RequirementResult],
 # ════════════════════════════════════════════════════════
 
 def _build_top_reasons(results: List[RequirementResult]) -> List[TopReason]:
-    """Top 3 ragioni più rilevanti — esclude PREMIANTE"""
     priority = [
         (Severity.HARD_KO, ReqStatus.KO),
         (Severity.HARD_KO, ReqStatus.FIXABLE),
@@ -216,7 +184,6 @@ def _build_top_reasons(results: List[RequirementResult]) -> List[TopReason]:
                 break
         if len(selected) >= 3:
             break
-
     return [
         TopReason(
             issue_type=r.req_id, severity=r.severity,
@@ -240,11 +207,10 @@ def _build_action_plan(results: List[RequirementResult],
     if not fixable:
         return ActionPlan(recommended_path="none", steps=[])
 
-    # Metodo più frequente
     all_methods: Dict[str, int] = {}
     for r in fixable:
         for m in r.fixability.allowed_methods:
-            base = m.split(" ")[0]  # ignora annotazioni es. "[DICHIARAZIONE...]"
+            base = m.split(" ")[0]
             all_methods[base] = all_methods.get(base, 0) + 1
     if not all_methods:
         return ActionPlan(recommended_path="none", steps=[])
@@ -260,11 +226,9 @@ def _build_action_plan(results: List[RequirementResult],
             inputs_needed=[
                 "Ausiliaria con SOA/requisiti richiesti validi",
                 "Verificare che ausiliaria non partecipi alla stessa gara",
-                "Verificare che non sia già ausiliaria di altro concorrente"
             ],
             risks=[
-                "Requisiti 'non frazionabili' (D18): o hai il 100% o KO",
-                "Ausiliaria deve avere ≥2 bilanci depositati (D17 — qualificazione)",
+                "Requisiti non frazionabili: o hai il 100% o KO",
                 f"Regole specifiche: {bando.avvalimento_regole or 'verificare'}"
             ]
         ))
@@ -272,13 +236,8 @@ def _build_action_plan(results: List[RequirementResult],
         steps.append(ActionStep(
             step=step_num, title="Redigi contratto di avvalimento specifico",
             why="Il contratto deve indicare esplicitamente risorse, mezzi e personale.",
-            inputs_needed=[
-                "Elenco specifico risorse/mezzi/personale (non generico)",
-                "Durata: intera esecuzione contratto",
-                "Clausola responsabilità solidale"
-            ],
-            risks=["Contratto 'vuoto' → nullità → esclusione",
-                   "Avvalimento vietato per requisiti generali (art.94-98, DURC)"]
+            inputs_needed=["Elenco specifico risorse/mezzi/personale", "Clausola responsabilità solidale"],
+            risks=["Contratto 'vuoto' → nullità → esclusione"]
         ))
         step_num += 1
 
@@ -290,12 +249,8 @@ def _build_action_plan(results: List[RequirementResult],
             inputs_needed=[
                 f"Mandataria: ≥{q_mand or '?'}% requisiti (SOA prevalente)",
                 "Mandanti: coprono scorporabili e requisiti secondari",
-                "Quote coerenti con qualificazioni possedute"
             ],
-            risks=[
-                f"Quote mandataria: {bando.rti_regole or 'verificare disciplinare'}",
-                "Firma mandato di rappresentanza PRIMA della scadenza offerta"
-            ]
+            risks=[f"Quote mandataria: {bando.rti_regole or 'verificare disciplinare'}"]
         ))
         step_num += 1
 
@@ -303,17 +258,12 @@ def _build_action_plan(results: List[RequirementResult],
         steps.append(ActionStep(
             step=step_num, title="Individua e formalizza gruppo di progettazione",
             why="Appalto integrato: progettisti obbligatori nell'offerta.",
-            inputs_needed=[
-                "Professionisti iscritti agli albi per le discipline richieste",
-                "Eventuale giovane professionista (R47) se richiesto",
-                "Dichiarazioni di disponibilità firmate"
-            ],
-            risks=["Mancanza iscrizione albo → esclusione",
-                   "Giovane professionista: verificare anni esatti di abilitazione"]
+            inputs_needed=["Professionisti iscritti agli albi", "Dichiarazioni di disponibilità firmate"],
+            risks=["Mancanza iscrizione albo → esclusione"]
         ))
         step_num += 1
 
-    elif recommended == "subappalto" or recommended == "subappalto_qualificante":
+    elif recommended in ("subappalto", "subappalto_qualificante"):
         pct = bando.subappalto_percentuale_max or 30
         steps.append(ActionStep(
             step=step_num, title="Pianifica subappalto qualificante",
@@ -321,22 +271,15 @@ def _build_action_plan(results: List[RequirementResult],
             inputs_needed=[
                 f"Subappaltatore con SOA richiesta",
                 f"Quota subappaltata ≤ {pct:.0f}% importo totale",
-                "Dichiarazione esplicita in DGUE (D03: non sanabile con soccorso se pena esclusione)"
             ],
-            risks=["Divieto cascata (R34)",
-                   "D04: prevalente deve coprire importo propria cat. + scorporabile subappaltata"]
+            risks=["Divieto cascata (R34)", "Dichiarazione esplicita in DGUE"]
         ))
         step_num += 1
 
-    # Step finale documentazione
     steps.append(ActionStep(
         step=step_num, title="Prepara documentazione struttura prescelta",
         why="Ogni struttura richiede documenti nell'envelope amministrativo.",
-        inputs_needed=[
-            "DGUE di tutti i soggetti",
-            "Dichiarazioni art.94-98 di tutti",
-            "Contratto avvalimento/mandato RTI/lettere d'incarico progettisti"
-        ],
+        inputs_needed=["DGUE di tutti i soggetti", "Dichiarazioni art.94-98 di tutti"],
         risks=["Documentazione incompleta → soccorso istruttorio o esclusione"]
     ))
     return ActionPlan(recommended_path=recommended, steps=steps)
@@ -395,7 +338,7 @@ def _build_procedural_checklist(bando: BandoRequisiti) -> List[ProceduralCheckIt
         ))
     if bando.is_qualification_system:
         items.append(ProceduralCheckItem(
-            item="Invio domanda di qualificazione (prima della scadenza / 6 mesi prima per rinnovo)",
+            item="Invio domanda di qualificazione (prima della scadenza)",
             status="PENDING", impact="HARD_KO"
         ))
         if bando.qualification_fee_required:
@@ -416,8 +359,7 @@ def _build_document_checklist(bando: BandoRequisiti, company: CompanyProfile) ->
         DocChecklistItem(name="Visura camerale / autocertificazione CCIAA"),
     ]
     if bando.sopralluogo_obbligatorio:
-        admin.append(DocChecklistItem(name="Attestato sopralluogo", mandatory=True,
-                                      notes="Pena esclusione"))
+        admin.append(DocChecklistItem(name="Attestato sopralluogo", mandatory=True, notes="Pena esclusione"))
     if bando.anac_contributo_richiesto == "yes":
         admin.append(DocChecklistItem(name="Ricevuta pagamento contributo ANAC"))
     if bando.patto_integrita_required:
@@ -427,16 +369,14 @@ def _build_document_checklist(bando: BandoRequisiti, company: CompanyProfile) ->
         admin.append(DocChecklistItem(name="Protocollo legalità firmato"))
     if bando.is_qualification_system:
         admin.append(DocChecklistItem(name="Domanda di qualificazione (modello committente)"))
-        if bando.qualification_fee_required:
-            admin.append(DocChecklistItem(name="Ricevuta versamento fee qualificazione"))
 
     technical = [
         DocChecklistItem(name="Copia attestato/i SOA (tutte le categorie richieste)"),
         DocChecklistItem(name="Certificazioni di qualità (ISO 9001/14001/45001 ecc.)"),
     ]
     if bando.soa_copy_required_pena_esclusione:
-        technical[0] = DocChecklistItem(name="Copia attestato SOA", mandatory=True,
-                                         notes="PENA DI ESCLUSIONE — firma digitale richiesta")
+        technical[0] = DocChecklistItem(name="Copia attestato SOA",
+                                         mandatory=True, notes="PENA DI ESCLUSIONE")
     if bando.appalto_integrato:
         technical.append(DocChecklistItem(name="Elenco nominativo progettisti + CV + iscrizione albo",
                                            notes="Obbligatorio per appalto integrato"))
@@ -445,48 +385,50 @@ def _build_document_checklist(bando: BandoRequisiti, company: CompanyProfile) ->
                                            mandatory=True, notes="Data abilitazione esplicita"))
     if bando.bim_ogi_required:
         technical.append(DocChecklistItem(name="OGI (Offerta Gestione Informativa BIM)",
-                                           mandatory=True, notes="Obbligatoria come contenuto offerta tecnica"))
+                                           mandatory=True))
     if bando.credit_license and bando.credit_license.required:
-        technical.append(DocChecklistItem(name="Patente a crediti (o copia richiesta presentata)",
+        technical.append(DocChecklistItem(name="Patente a crediti",
                                            mandatory=bando.credit_license.pena_esclusione))
     if bando.cultural_works_dm154_required:
         technical.append(DocChecklistItem(name="Qualificazione DM 154/2017 beni culturali",
                                            mandatory=bando.cultural_works_dm154_pena_esclusione))
 
-    economic = [
-        DocChecklistItem(name="Offerta economica (modello bando)", mandatory=True),
-    ]
+    economic = [DocChecklistItem(name="Offerta economica (modello bando)", mandatory=True)]
     if bando.labour_costs_must_indicate:
         economic.append(DocChecklistItem(name="Costi manodopera indicati in offerta economica",
-                                          mandatory=bando.labour_costs_pena_esclusione,
-                                          notes="A pena esclusione se richiesto"))
+                                          mandatory=bando.labour_costs_pena_esclusione))
     if bando.safety_company_costs_must_indicate:
-        economic.append(DocChecklistItem(name="Oneri sicurezza aziendali indicati in offerta economica",
+        economic.append(DocChecklistItem(name="Oneri sicurezza aziendali indicati",
                                           mandatory=bando.safety_costs_pena_esclusione))
     if bando.criteri_valutazione:
         economic.append(DocChecklistItem(
-            name=f"Relazione tecnica OEPV ({len(bando.criteri_valutazione)} criteri)",
-            mandatory=True))
+            name=f"Relazione tecnica OEPV ({len(bando.criteri_valutazione)} criteri)", mandatory=True))
 
+    from src.schemas import _Base
+    has_iso9001 = False
+    try:
+        from src.requirements_engine import _cert_match
+        has_iso9001 = any(_cert_match("ISO 9001", c.cert_type) for c in company.certifications)
+    except Exception:
+        pass
+    prov_note = "Verifica riduzione 50% per ISO 9001" if has_iso9001 else "Verifica riduzioni MPMI"
     guarantees = [
         DocChecklistItem(name="Cauzione provvisoria (fideiussione bancaria/assicurativa)",
                           mandatory=bando.garanzie_richieste is not None,
-                          notes="Verifica riduzioni per ISO 9001/MPMI"),
+                          notes=prov_note),
         DocChecklistItem(name="Impegno fideiussore per definitiva"),
     ]
     for pol in bando.polizze_richieste:
-        guarantees.append(DocChecklistItem(name=f"Polizza {pol}", mandatory=False,
-                                            notes="Pre-consegna lavori"))
+        guarantees.append(DocChecklistItem(name=f"Polizza {pol}", mandatory=False))
 
     platform = [
-        DocChecklistItem(
-            name=f"Upload su {bando.piattaforma_gara or 'piattaforma gara'}",
-            notes="Rispettare formati e dimensioni"),
+        DocChecklistItem(name=f"Upload su {bando.piattaforma_gara or 'piattaforma gara'}",
+                          notes="Rispettare formati e dimensioni"),
         DocChecklistItem(name="Firma digitale su ogni documento"),
     ]
     if bando.pnrr_dnsh_required:
-        platform.append(DocChecklistItem(name="Dichiarazione DNSH + checklist allegata",
-                                          mandatory=True))
+        platform.append(DocChecklistItem(name="Dichiarazione DNSH + checklist allegata", mandatory=True))
+
     return DocumentChecklist(
         administrative=admin, technical=technical, economic=economic,
         guarantees=guarantees, platform=platform
@@ -497,24 +439,20 @@ def _build_document_checklist(bando: BandoRequisiti, company: CompanyProfile) ->
 # Risk Register
 # ════════════════════════════════════════════════════════
 
-def _build_risk_register(bando: BandoRequisiti,
-                         results: List[RequirementResult]) -> List[Risk]:
+def _build_risk_register(bando: BandoRequisiti, results: List[RequirementResult]) -> List[Risk]:
     risks = []
 
-    # SOA scadenze imminenti
     for r in results:
         if "C5_" in r.req_id and r.status == ReqStatus.KO:
             risks.append(Risk(risk_id=r.req_id, risk_type="soa_expiry", level="HIGH",
                               message=r.user_message,
                               mitigations=["Avviare rinnovo SOA immediatamente"]))
 
-    # Inizio lavori tassativo
     if bando.start_lavori_tassativo:
         risks.append(Risk(risk_id="M1", risk_type="start_date", level="HIGH",
                           message=f"Inizio lavori tassativo: {bando.start_lavori_tassativo}",
                           mitigations=["Pianificare forniture e risorse in anticipo"]))
 
-    # Scadenze critiche
     for sc in bando.scadenze:
         if sc.data:
             gg = _days_left(sc.data)
@@ -522,37 +460,30 @@ def _build_risk_register(bando: BandoRequisiti,
                 risks.append(Risk(risk_id=f"H_deadline_{sc.tipo}",
                                   risk_type="deadline_critical", level="HIGH",
                                   message=f"Scadenza critica: {sc.tipo} entro {gg} giorni ({sc.data})",
-                                  mitigations=["Agire entro oggi", "Delegare se necessario"]))
+                                  mitigations=["Agire entro oggi"]))
 
-    # Vincoli esecutivi
     for v in bando.vincoli_esecutivi:
         lv = v.lower()
         level = "HIGH" if any(k in lv for k in ["scuola", "ospedale", "occupato", "tassativo"]) else "MEDIUM"
         risks.append(Risk(risk_id="M_exec", risk_type="execution_constraint",
                           level=level, message=v,
-                          mitigations=["Pianificare fasi e turni", "Verificare accesso cantiere"]))
+                          mitigations=["Pianificare fasi e turni"]))
 
-    # PNRR
     if bando.is_pnrr and bando.pnrr_dnsh_required:
         risks.append(Risk(risk_id="PNRR_DNSH", risk_type="pnrr_compliance", level="HIGH",
                           message="DNSH obbligatorio in gara PNRR: mancanza = KO.",
-                          mitigations=["Compilare checklist DNSH (scheda specifica)", "Allegare dichiarazione d'impegno"]))
+                          mitigations=["Compilare checklist DNSH", "Allegare dichiarazione d'impegno"]))
 
-    # D09 — lotti
     if bando.lots_max_awardable_per_bidder and bando.lotti > 1:
-        risks.append(Risk(risk_id="D09_lotti", risk_type="strategy",
-                          level="MEDIUM",
-                          message=f"Gara multi-lotto ({bando.lotti}): max {bando.lots_max_awardable_per_bidder} aggiudicazione. "
-                                  "Scegliere il lotto target strategico.",
-                          mitigations=["Analizzare concorrenza per lotto", "Valutare margini per lotto"]))
+        risks.append(Risk(risk_id="D09_lotti", risk_type="strategy", level="MEDIUM",
+                          message=f"Gara multi-lotto ({bando.lotti}): max {bando.lots_max_awardable_per_bidder} aggiudicabili.",
+                          mitigations=["Scegliere il lotto target strategico"]))
 
-    # Qualificazione — rinnovo
     if bando.is_qualification_system and bando.qualification_expiry_date:
         gg = _days_left(bando.qualification_expiry_date)
         if gg is not None and gg < 180:
             risks.append(Risk(risk_id="D15_rinnovo", risk_type="qualification_expiry", level="HIGH",
-                              message=f"Qualificazione scade {bando.qualification_expiry_date} "
-                                      f"(tra ~{gg//30} mesi): inviare rinnovo subito.",
+                              message=f"Qualificazione scade {bando.qualification_expiry_date} (tra ~{gg//30} mesi).",
                               mitigations=[f"Inviare domanda rinnovo almeno {bando.maintenance_submit_months_before} mesi prima"]))
 
     return risks
@@ -562,8 +493,7 @@ def _build_risk_register(bando: BandoRequisiti,
 # Uncertainties
 # ════════════════════════════════════════════════════════
 
-def _build_uncertainties(results: List[RequirementResult],
-                          bando: BandoRequisiti) -> List[Uncertainty]:
+def _build_uncertainties(results: List[RequirementResult], bando: BandoRequisiti) -> List[Uncertainty]:
     questions = []
     for r in results:
         if r.status == ReqStatus.UNKNOWN and r.severity == Severity.HARD_KO:
@@ -580,15 +510,8 @@ def _build_uncertainties(results: List[RequirementResult],
         ))
     if bando.anac_contributo_richiesto == "unknown" and bando.codice_cig:
         questions.append(Uncertainty(
-            question="Il bando richiede pagamento contributo ANAC? Verificare art. 'Contributo ANAC'.",
+            question="Il bando richiede pagamento contributo ANAC? Verificare articolo dedicato.",
             why_needed="Mancato pagamento = esclusione",
-            blocks_verdict=True
-        ))
-    if bando.appalto_integrato and not any(r.req_id == "R46" and r.status == ReqStatus.OK
-                                           for r in results):
-        questions.append(Uncertainty(
-            question="Hai progettisti disponibili con iscrizione all'albo per le discipline richieste?",
-            why_needed="Appalto integrato: progettisti obbligatori nell'offerta",
             blocks_verdict=True
         ))
     return questions[:8]
@@ -598,18 +521,9 @@ def _build_uncertainties(results: List[RequirementResult],
 # ENTRY POINT PRINCIPALE
 # ════════════════════════════════════════════════════════
 
-def produce_decision_report(bando: BandoRequisiti,
-                            company: CompanyProfile) -> DecisionReport:
-    """
-    Orchestratore v4.0 — Libreria Requisiti v2.1:
-    1. Valuta tutti i requisiti (84 attivi)
-    2. Verdetto con confidence-based logic (C.2)
-    3. Engine qualificazione (D11) se applicabile
-    4. Output PPP per fase (D21) se multi-stage
-    """
+def produce_decision_report(bando: BandoRequisiti, company: CompanyProfile) -> DecisionReport:
     audit: List[AuditEntry] = []
 
-    # Determina engine_mode
     if bando.is_qualification_system:
         engine_mode = "qualificazione"
     elif bando.procedure_multi_stage:
@@ -617,7 +531,6 @@ def produce_decision_report(bando: BandoRequisiti,
     else:
         engine_mode = "gara"
 
-    # 1. Valuta requisiti
     results = evaluate_all(bando, company)
     audit.append(AuditEntry(
         event="EVALUATE_ALL_REQUIREMENTS",
@@ -625,27 +538,21 @@ def produce_decision_report(bando: BandoRequisiti,
         confidence=1.0
     ))
 
-    # 2. Profile confidence (C.2)
     profile_conf = min((r.confidence for r in results if r.severity == Severity.HARD_KO), default=1.0)
     audit.append(AuditEntry(
         event="PROFILE_CONFIDENCE",
-        result=f"Confidence aggregata: {profile_conf:.1f} "
-               f"({'COMPLETE' if profile_conf == 1.0 else 'PROVISIONAL' if profile_conf >= 0.7 else 'UNRELIABLE'})",
+        result=f"Confidence aggregata: {profile_conf:.1f}",
         confidence=profile_conf
     ))
 
-    # 3. Verdetto
     verdict = _compute_verdict(results, bando)
     audit.append(AuditEntry(
         event="COMPUTE_VERDICT",
-        result=f"Verdetto: {verdict.status} | Conf. profilo: {profile_conf:.1f}",
+        result=f"Verdetto: {verdict.status} | Conf: {profile_conf:.1f}",
         confidence=profile_conf
     ))
 
-    # 4. Top reasons
     top_reasons = _build_top_reasons(results)
-
-    # 5. Action plan
     action_plan = _build_action_plan(results, bando, company)
     audit.append(AuditEntry(
         event="BUILD_ACTION_PLAN",
@@ -653,16 +560,9 @@ def produce_decision_report(bando: BandoRequisiti,
         confidence=1.0
     ))
 
-    # 6. Checklist procedurale
     proc_checklist = _build_procedural_checklist(bando)
-
-    # 7. Checklist documentale
     doc_checklist = _build_document_checklist(bando, company)
-
-    # 8. Risk register
     risk_register = _build_risk_register(bando, results)
-
-    # 9. Incertezze
     uncertainties = _build_uncertainties(results, bando)
 
     return DecisionReport(

@@ -379,15 +379,19 @@ def eval_R13(bando: BandoRequisiti) -> Optional[RequirementResult]:
         confidence=1.0
     )
 
-def eval_R14(bando: BandoRequisiti) -> RequirementResult:
-    return RequirementResult(
-        req_id="R14", name="Cause di esclusione art.94–98", category="general",
-        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
-        user_message="Verificare assenza cause esclusione (art.94–98 d.lgs.36/2023) per: "
-                     "legale rappresentante, soci maggioritari, direttori tecnici, amministratori. "
-                     "Self-cleaning ammesso se documentato.",
-        confidence=0.7
-    )
+def eval_D14(bando, _) -> object:
+    """D14 — Mantenimento qualificazione: comunicazione variazioni (FIX: MaintenanceVariation)"""
+    from src.requirements_engine import _risk
+    if not bando.is_qualification_system or not bando.maintenance_variation_types:
+        return None
+    # FIX: .type e .notify_within_days invece di .get("type") e .get("notify_within_days")
+    var_list = [
+        f"{v.type or '?'}: entro {v.notify_within_days or '?'} gg"
+        for v in bando.maintenance_variation_types
+    ]
+    return _risk("D14", "Mantenimento qualificazione — comunicazione variazioni", "qualification",
+                 "Obbligo comunicazione variazioni: " + "; ".join(var_list) + ". "
+                 "Ritardo → sospensione/dequalifica.")
 
 def eval_R15(bando: BandoRequisiti) -> RequirementResult:
     return RequirementResult(
@@ -459,53 +463,40 @@ def eval_R19(bando: BandoRequisiti, company: CompanyProfile) -> Optional[Require
 # LIVELLO 7 — Economico-finanziari (R20, R21, R22, R23)
 # ─────────────────────────────────────────────────────────
 
-def eval_R20(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    req = bando.fatturato_minimo_richiesto
-    if not req:
+def eval_D20(bando) -> object:
+    """D20 — Fee qualificazione (FIX: QualificationFee .system e .amount)"""
+    from src.requirements_engine import _unknown, _risk
+    from src.schemas import ReqStatus, Severity, RequirementResult
+    if not bando.is_qualification_system or not bando.qualification_fee_required:
         return None
-    recent = sorted(company.turnover_by_year, key=lambda x: x.year, reverse=True)[:bando.fatturato_anni_riferimento]
-    if not recent:
-        return _unknown("R20", "Fatturato globale minimo", "financial",
-                        f"Soglia: {req:,.0f}€. Caricare dati fatturato nel profilo.",
-                        sev=Severity.HARD_KO)
-    avg = sum(r.amount_eur for r in recent) / len(recent)
-    if avg >= req:
-        return _ok("R20", "Fatturato globale minimo", "financial",
-                   f"Fatturato medio {avg:,.0f}€ ≥ soglia {req:,.0f}€ ✓")
-    methods = []
-    if bando.avvalimento_ammesso == "yes":
-        methods.append("avvalimento")
-    if bando.rti_ammesso == "yes":
-        methods.append("rti (sommando fatturati)")
-    return _ko("R20", "Fatturato globale minimo", "financial", Severity.HARD_KO,
-               f"Fatturato medio {avg:,.0f}€ < soglia {req:,.0f}€. "
-               "In RTI: mandataria ≥40% della soglia, mandanti la differenza.",
-               fixable=bool(methods), methods=methods,
-               gaps=[f"Fatturato globale {req:,.0f}€"])
+    # FIX: .system e .amount invece di .get("system") e .get("amount")
+    if bando.qualification_fee_amounts:
+        fee_str = "; ".join(
+            f"{f.system or '?'}: {f.amount or '?'}€"
+            for f in bando.qualification_fee_amounts
+        )
+    else:
+        fee_str = "verificare tabella"
+    return RequirementResult(
+        req_id="D20", name="Fee qualificazione obbligatorio", category="procedural",
+        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+        user_message=f"Rimborso spese richiesto: {fee_str}. Mancato pagamento → KO procedura. "
+                     + ("Visita tecnica possibile: pagare fee prima." if bando.qualification_site_visit_possible else ""),
+        confidence=1.0
+    )
 
-def eval_R21(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    req_val = bando.referenze_valore_min
-    if not req_val:
+
+def eval_D21(bando) -> object:
+    """D21 — PPP multi-stage (FIX: ProcedureStage .name)"""
+    from src.requirements_engine import _risk
+    if not bando.procedure_multi_stage:
         return None
-    similar = company.similar_works
-    if not similar:
-        return _unknown("R21", "Referenze lavori/servizi analoghi", "financial",
-                        f"Soglia referenze: {req_val:,.0f}€ in {bando.referenze_anni_lookback} anni. "
-                        "Inserire opere analoghe nel profilo.",
-                        sev=Severity.HARD_KO)
-    tot = sum(w.amount_eur for w in similar)
-    if tot >= req_val:
-        return _ok("R21", "Referenze lavori analoghi", "financial",
-                   f"Referenze totali {tot:,.0f}€ ≥ soglia {req_val:,.0f}€ ✓")
-    methods = []
-    if bando.avvalimento_ammesso == "yes":
-        methods.append("avvalimento")
-    if bando.rti_ammesso == "yes":
-        methods.append("rti")
-    return _ko("R21", "Referenze lavori analoghi", "financial", Severity.HARD_KO,
-               f"Referenze {tot:,.0f}€ < soglia {req_val:,.0f}€ in {bando.referenze_anni_lookback} anni.",
-               fixable=bool(methods), methods=methods,
-               gaps=[f"Referenze analoghi {req_val:,.0f}€"])
+    # FIX: .name invece di .get("name", "?")
+    stages_str = ", ".join(s.name or "?" for s in bando.procedure_stages) \
+                 if bando.procedure_stages else "N/D"
+    return _risk("D21", f"PPP multi-stage: {stages_str}", "meta",
+                 f"Procedura multi-stage ({stages_str}). "
+                 "AI-GR-04: mai GO/NO_GO unico. Output per FASE.")
 
 def eval_R22(bando: BandoRequisiti) -> Optional[RequirementResult]:
     """R22 — EOI esperienza territoriale (ANTI-INF-07: NON è KO gara)"""

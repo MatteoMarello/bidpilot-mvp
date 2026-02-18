@@ -33,7 +33,6 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 /* Nasconde elementi inutili — NON nascondere header: contiene il toggle sidebar */
 #MainMenu { visibility: hidden !important; }
 footer { display: none !important; }
-[data-testid="stToolbar"] { display: none !important; }
 .block-container { padding: 1.5rem 2rem 2rem 2rem !important; max-width: 1400px; }
 
 /* ── TOP HEADER BAR ── */
