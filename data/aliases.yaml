@@ -1,0 +1,35 @@
+# BidPilot — Dizionario equivalenze certificazioni
+# Aggiornare qui senza rilasciare codice.
+# Formato: chiave = forma normalizzata (uppercase, senza spazi/simboli), valore = equivalente accettato.
+#
+# NOTA: se questo file manca o PyYAML non è installato, il sistema degrada
+# a dizionari vuoti → nessuna equivalenza riconosciuta → comportamento STRICT
+# (possibile RISK_FLAG o KO, MAI falsi OK). Questo è il comportamento atteso.
+
+cert_equivalences:
+  # Equivalenze FULL (match pieno bidirezionale).
+  # Usare solo per varianti formali dello stesso standard (prefisso UNI/EN/ISO).
+  # NON aggiungere qui standard diversi (es. OHSAS18001 → va in risk_flag).
+  full:
+    UNIISO9001: ISO9001
+    UNIENISO9001: ISO9001
+    UNIISO14001: ISO14001
+    UNIENISO14001: ISO14001
+    UNIISO45001: ISO45001
+    UNIENISO45001: ISO45001
+    UNIISO27001: ISO27001
+    UNIENISO27001: ISO27001
+    ISO50001: ISO50001
+    UNIISO50001: ISO50001
+
+  # Equivalenze RISK_FLAG (vecchio ↔ nuovo standard).
+  # Queste NON producono match pieno: generano un avviso che richiede
+  # verifica esplicita nel disciplinare prima di procedere.
+  risk_flag:
+    OHSAS18001: ISO45001
+    BSOHSAS18001: ISO45001
+    # Aggiungere qui altri standard deprecati/sostituiti
+
+# _CPV_SECTOR_MAP rimane in codice (src/requirements_engine.py) per evitare
+# regressioni senza una test suite a copertura. Da migrare qui in uno step
+# separato con test golden dedicati.

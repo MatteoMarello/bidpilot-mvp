@@ -26,3 +26,12 @@ pydantic==2.7.1
 # Utils
 python-dateutil==2.9.0
 tiktoken==0.7.0
+
+# FIX-01: Timezone-aware datetime (Europe/Rome)
+# zoneinfo è stdlib da Python ≥3.9 (stdlib).
+# tzdata fornisce il database IANA su Windows e Alpine (dove non è installato di sistema).
+# Se devi supportare Python <3.9, aggiungi invece: backports.zoneinfo>=0.2.1
+tzdata>=2024.1
+
+# FIX-04: Aliases certificazioni da file esterno
+PyYAML>=6.0

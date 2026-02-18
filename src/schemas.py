@@ -1,17 +1,15 @@
 """
-BidPilot v4.0 - Schemi Pydantic
-FIX: sostituiti tutti i Dict[str, Any] con modelli tipizzati — richiesto da OpenAI Structured Output
-     (additionalProperties deve essere false su ogni oggetto annidato)
+BidPilot v4.2 - Schemi Pydantic
+PATCH v4.2 (evidence-first):
+  - Scadenza: aggiunto campo `evidence` (quote testuale obbligatoria per guardrail)
+  - BandoRequisiti: aggiunto `cig_evidence` e `piattaforma_evidence`
+    → entrambi obbligatori per i guardrail post-estrazione (B)
 """
 from __future__ import annotations
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from enum import Enum
 
-
-# ══════════════════════════════════════════════════════════
-# CONFIG BASE — forza additionalProperties=false su tutti
-# ══════════════════════════════════════════════════════════
 
 class _Base(BaseModel):
     model_config = {"extra": "forbid"}
@@ -45,24 +43,21 @@ class VerdictStatus(str, Enum):
 
 
 # ══════════════════════════════════════════════════════════
-# MODELLI ANNIDATI — ex Dict[str, Any]
+# MODELLI ANNIDATI
 # ══════════════════════════════════════════════════════════
 
 class MaintenanceVariation(_Base):
-    """Tipo di variazione per mantenimento qualificazione (ex Dict[str, Any])"""
     type: str = ""
     notify_within_days: Optional[int] = None
     notes: str = ""
 
 class QualificationFee(_Base):
-    """Fee qualificazione per sistema/sottosistema (ex Dict[str, Any])"""
     system: str = ""
     amount: Optional[float] = None
     currency: str = "EUR"
     notes: str = ""
 
 class ProcedureStage(_Base):
-    """Fase procedura multi-stage PPP (ex Dict[str, Any])"""
     name: str = ""
     documents_required: List[str] = Field(default_factory=list)
     deadline: Optional[str] = None
@@ -256,19 +251,18 @@ class AuditEntry(_Base):
     event: str
     result: str
     confidence: float = 1.0
-    evidence_refs: List[str] = Field(default_factory=list)   # FIX: era List[Dict[str,Any]]
+    evidence_refs: List[str] = Field(default_factory=list)
 
 class Verdict(_Base):
     status: VerdictStatus
     legal_eligibility: Literal["eligible", "not_eligible", "uncertain"]
     operational_feasibility: Literal["feasible", "risky", "not_feasible", "uncertain"]
     summary: str = ""
-    stage_outputs_json: str = ""      # FIX: era Dict[str,str] — serializzato come JSON string
+    stage_outputs_json: str = ""
     profile_confidence: float = 1.0
 
     @property
     def stage_outputs(self):
-        """Compatibilità con il codice esistente che usa .stage_outputs come dict"""
         import json
         if self.stage_outputs_json:
             try:
@@ -289,7 +283,6 @@ class DecisionReport(_Base):
     audit_trace: List[AuditEntry] = Field(default_factory=list)
     generated_at: str = ""
     engine_mode: Literal["gara", "qualificazione", "ppp_multistage"] = "gara"
-    # tender_profile rimosso: era Optional[Any], non compatibile con structured output
 
 
 # ══════════════════════════════════════════════════════════
@@ -302,6 +295,7 @@ class Scadenza(_Base):
     ora: Optional[str] = None
     obbligatorio: bool = False
     note: Optional[str] = None
+    # PATCH v4.2: evidence obbligatoria per guardrail post-estrazione (B)
     evidence: Optional[str] = None
     esclusione_se_mancante: bool = False
 
@@ -314,7 +308,7 @@ class SOACategoria(_Base):
     is_scorporabile: bool = False
     qualificazione_obbligatoria: bool = True
     subappaltabile_100: bool = False
-    evidence: Optional[str] = None
+    evidence: Optional[str] = None   # OBBLIGATORIA: guardrail rimuove entry senza evidence
 
 class SOAEquivalenza(_Base):
     from_cat: str
@@ -348,7 +342,7 @@ class CrediteLicense(_Base):
     pena_esclusione: bool = False
 
 class BandoRequisiti(_Base):
-    """Schema v4.1 — tutti i Dict[str,Any] sostituiti con modelli tipizzati"""
+    """Schema v4.2 — aggiunge cig_evidence, piattaforma_evidence per evidence-first pipeline"""
 
     # ─── Metadati gara ────────────────────────────────────
     oggetto_appalto: str
@@ -370,7 +364,6 @@ class BandoRequisiti(_Base):
 
     procedure_legal_basis: Optional[str] = None
 
-    # D11 — Sistema di Qualificazione
     is_qualification_system: bool = False
     qualification_system_owner: Optional[str] = None
     qualification_system_type: Optional[str] = None
@@ -378,7 +371,6 @@ class BandoRequisiti(_Base):
         "prima_iscrizione", "estensione", "mantenimento", "dequalifica"
     ]] = None
 
-    # Flags speciali
     is_pnrr: bool = False
     is_bim: bool = False
     is_concession: bool = False
@@ -388,7 +380,7 @@ class BandoRequisiti(_Base):
 
     # ─── Importi ──────────────────────────────────────────
     importo_lavori: Optional[float] = None
-    importo_evidence: Optional[str] = None
+    importo_evidence: Optional[str] = None   # OBBLIGATORIA per guardrail
     importo_base_gara: Optional[float] = None
     oneri_sicurezza: Optional[float] = None
     importo_totale: Optional[float] = None
@@ -402,6 +394,8 @@ class BandoRequisiti(_Base):
     # ─── Codici ───────────────────────────────────────────
     codice_cup: Optional[str] = None
     codice_cig: Optional[str] = None
+    # PATCH v4.2: evidence per CIG obbligatoria (guardrail B)
+    cig_evidence: Optional[str] = None
     cpv: Optional[str] = None
 
     # ─── Procedura ────────────────────────────────────────
@@ -420,6 +414,8 @@ class BandoRequisiti(_Base):
     piattaforma_url: Optional[str] = None
     piattaforma_spid_required: bool = False
     piattaforma_failure_policy_exists: bool = False
+    # PATCH v4.2: evidence per piattaforma (guardrail B)
+    piattaforma_evidence: Optional[str] = None
 
     platform_failure_extends_deadline: bool = False
     platform_failure_notification_required: bool = False
@@ -572,13 +568,12 @@ class BandoRequisiti(_Base):
     qualification_integration_only_if_owned: bool = False
     qualification_missing_docs_deadline_days: Optional[int] = None
     qualification_failure_effect: Optional[str] = None
-    # FIX: era List[Dict[str,Any]]
     maintenance_variation_types: List[MaintenanceVariation] = Field(default_factory=list)
     maintenance_renewal_cycle_years: int = 3
     maintenance_submit_months_before: int = 6
     maintenance_timely_extends_validity: bool = False
     qualification_expiry_date: Optional[str] = None
-    psf_min_threshold: Optional[float] = None   # FIX: era Optional[Any] — usiamo float; "in_normativa_sottosistema" → None
+    psf_min_threshold: Optional[float] = None
     psf_below_threshold_effect: Optional[str] = None
     psf_exception_concordato: bool = False
     financial_min_bilanci_applicant: int = 1
@@ -590,13 +585,11 @@ class BandoRequisiti(_Base):
     interpello_cap_rule: Optional[str] = None
     rete_soggettivita_giuridica_required: bool = False
     qualification_fee_required: bool = False
-    # FIX: era List[Dict[str,Any]]
     qualification_fee_amounts: List[QualificationFee] = Field(default_factory=list)
     qualification_site_visit_possible: bool = False
 
     # ─── D21-D23: PPP / Grandi Opere ─────────────────────
     procedure_multi_stage: bool = False
-    # FIX: era List[Dict[str,Any]]
     procedure_stages: List[ProcedureStage] = Field(default_factory=list)
     ppp_private_share_percent: Optional[float] = None
     ppp_private_contribution_amount: Optional[float] = None
@@ -608,7 +601,7 @@ class BandoRequisiti(_Base):
 
 
 # ══════════════════════════════════════════════════════════
-# TenderProfile (legacy, non usato in structured output)
+# TenderProfile (legacy)
 # ══════════════════════════════════════════════════════════
 
 class Deadline(_Base):
