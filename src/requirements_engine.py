@@ -985,7 +985,6 @@ def eval_R41_R45(bando: BandoRequisiti, company: CompanyProfile) -> List[Require
     # R42 — Competenze BIM pregresse (HARD se ammissione, PREMIANTE se OGI)
     if bando.bim_experience_required:
         if bando.bim_experience_is_admission:
-            # È requisito di partecipazione
             min_count = bando.bim_experience_min_count or 1
             if company.has_bim_experience and company.bim_experience_count >= min_count:
                 results.append(_ok("R42", "BIM — Esperienza pregressa", "design",
@@ -999,7 +998,6 @@ def eval_R41_R45(bando: BandoRequisiti, company: CompanyProfile) -> List[Require
                                    methods=["rti"] if bando.rti_ammesso == "yes" else [],
                                    gaps=[f"Esperienze BIM pregresse (min {min_count})"]))
         else:
-            # Premiante nell'OGI
             if company.has_bim_experience:
                 results.append(_premiante("R42", "BIM — Esperienza pregressa (criterio OGI)", "design",
                                           "Esperienza BIM disponibile: inserire nell'OGI per punteggio OEPV."))
@@ -1043,7 +1041,7 @@ def eval_R41_R45(bando: BandoRequisiti, company: CompanyProfile) -> List[Require
 
 
 # ─────────────────────────────────────────────────────────
-# LIVELLO 14 — Appalto integrato (R46, R47, R48)
+# LIVELLO 14 — Appalto integrato (R46, R47, R48, R49)
 # ─────────────────────────────────────────────────────────
 
 def eval_R46(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
@@ -1407,10 +1405,8 @@ def eval_D_certificazioni(bando: BandoRequisiti, company: CompanyProfile) -> Lis
     results = []
     for i, cert_req in enumerate(bando.certificazioni_richieste):
         req_id = f"D{i+1}"
-        # Usa _cert_match STRICT invece di semplice substring
         found = next((c for c in company.certifications if _cert_match(cert_req, c.cert_type)), None)
         if not found:
-            # Controlla se c'è una cert "simile ma diversa" (falso positivo potenziale)
             similar = next((c for c in company.certifications
                             if _normalize_cert(cert_req)[:3] in _normalize_cert(c.cert_type)), None)
             note = ""
@@ -1429,7 +1425,6 @@ def eval_D_certificazioni(bando: BandoRequisiti, company: CompanyProfile) -> Lis
                                    f"{cert_req} SCADUTA il {found.expiry_date}.",
                                    gaps=[f"Rinnovo {cert_req}"]))
             else:
-                # Indica se soddisfatto via equivalenza
                 match_note = ""
                 if not _normalize_cert(cert_req).startswith(_normalize_cert(found.cert_type)[:4]):
                     match_note = f" (tramite equivalenza normativa: {found.cert_type})"
@@ -1512,21 +1507,21 @@ def evaluate_all(bando: BandoRequisiti, company: CompanyProfile,
             r = fn(bando)
             if r:
                 results.append(r)
-        r16 = eval_D16(bando, company)
-        if r16:
-            results.append(r16)
-        r17 = eval_D17(bando, company)
-        if r17:
-            results.append(r17)
-        r18 = eval_D18(bando, company)
-        if r18:
-            results.append(r18)
-        r19 = eval_D19(bando, company)
-        if r19:
-            results.append(r19)
-        r20 = eval_D20(bando)
-        if r20:
-            results.append(r20)
+        r = eval_D16(bando, company)
+        if r:
+            results.append(r)
+        r = eval_D17(bando, company)
+        if r:
+            results.append(r)
+        r = eval_D18(bando, company)
+        if r:
+            results.append(r)
+        r = eval_D19(bando, company)
+        if r:
+            results.append(r)
+        r = eval_D20(bando)
+        if r:
+            results.append(r)
         return [r for r in results if r is not None]
 
     # ─── ENGINE GARA ORDINARIA ────────────────────────────
@@ -1570,4 +1565,151 @@ def evaluate_all(bando: BandoRequisiti, company: CompanyProfile,
         # L5 — Requisiti generali
         r = eval_R13(bando)
         if r:
-            results
+            results.append(r)
+        results.append(eval_R14(bando))
+        results.append(eval_R15(bando))
+        r = eval_R16(bando)
+        if r:
+            results.append(r)
+        r = eval_R17(bando)
+        if r:
+            results.append(r)
+
+        # L6 — Idoneità professionale
+        results.append(eval_R18(bando, company))
+        r = eval_R19(bando, company)
+        if r:
+            results.append(r)
+
+        # L7 — Economico-finanziari e tecnici
+        r = eval_R20(bando, company)
+        if r:
+            results.append(r)
+        r = eval_R21(bando, company)
+        if r:
+            results.append(r)
+        r = eval_R22(bando)
+        if r:
+            results.append(r)
+        r = eval_R23(bando)
+        if r:
+            results.append(r)
+
+        # L8 — SOA e categorie (solo lavori ≥ 150k)
+        r = eval_R24(bando)
+        if r:
+            results.append(r)
+        results.append(eval_R25(bando, company))
+        results.extend(eval_R26_scorporabili(bando, company))
+        r = eval_R27(bando)
+        if r:
+            results.append(r)
+        r = eval_R27_alt_culturale(bando)
+        if r:
+            results.append(r)
+        results.extend(eval_R28_soa_validita(bando, company))
+        r = eval_R29_accordo_quadro(bando)
+        if r:
+            results.append(r)
+
+        # D01–D10 — SOA Differenzianti
+        r = eval_D02(bando)
+        if r:
+            results.append(r)
+        r = eval_D05(bando, company)
+        if r:
+            results.append(r)
+        r = eval_D06(bando)
+        if r:
+            results.append(r)
+        r = eval_D09(bando)
+        if r:
+            results.append(r)
+        r = eval_D10(bando, company)
+        if r:
+            results.append(r)
+
+        # L9 — Garanzie e polizze
+        r = eval_R30(bando, company)
+        if r:
+            results.append(r)
+        results.extend(eval_R31_R32(bando))
+
+        # L10 — Avvalimento e subappalto
+        r = eval_R33(bando)
+        if r:
+            results.append(r)
+        r = eval_R34(bando)
+        if r:
+            results.append(r)
+        r = eval_R35(bando)
+        if r:
+            results.append(r)
+
+        # L11 — CCNL e manodopera
+        r = eval_R36(bando, company)
+        if r:
+            results.append(r)
+        r = eval_R37(bando)
+        if r:
+            results.append(r)
+
+        # L12 — PNRR (solo se is_pnrr)
+        results.extend(eval_R38_R39(bando))
+
+        # L13 — BIM (solo se is_bim)
+        results.extend(eval_R41_R45(bando, company))
+
+        # L14 — Appalto integrato
+        r = eval_R46(bando, company)
+        if r:
+            results.append(r)
+        r = eval_R47(bando, company)
+        if r:
+            results.append(r)
+        r = eval_R48(bando)
+        if r:
+            results.append(r)
+        r = eval_R49(bando)
+        if r:
+            results.append(r)
+
+        # L15 — Regole contrattuali e procedurali
+        r = eval_R50(bando)
+        if r:
+            results.append(r)
+        results.extend(eval_R51_R52(bando))
+        r = eval_R53(bando)
+        if r:
+            results.append(r)
+
+        # L16 — Tipologie speciali
+        results.extend(eval_R54_R55(bando))
+        r = eval_R58(bando)
+        if r:
+            results.append(r)
+        r = eval_R59(bando)
+        if r:
+            results.append(r)
+
+        # Certificazioni richieste (strict matching)
+        results.extend(eval_D_certificazioni(bando, company))
+
+    # PPP / Grandi Opere (D21–D23) — valutati sempre se multi-stage
+    r = eval_D21(bando)
+    if r:
+        results.append(r)
+    r = eval_D22(bando, company)
+    if r:
+        results.append(r)
+    r = eval_D23(bando)
+    if r:
+        results.append(r)
+
+    # Vincoli esecutivi (M1, M2+)
+    r = eval_M1(bando, company)
+    if r:
+        results.append(r)
+    results.extend(eval_M_vincoli(bando))
+
+    return [r for r in results if r is not None]
