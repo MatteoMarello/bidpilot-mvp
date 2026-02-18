@@ -1,12 +1,8 @@
 """
-BidPilot v3.1 — Libreria Requisiti Atomici (A1–M7)
-FIXES v3.1:
-  - [C1/C2] Classifica SOA calcolata sull'importo della CATEGORIA, non sul totale appalto
-  - [C1/C2] Distinzione netta Prevalente vs Scorporabili; suggerito RTI Orizzontale se gap
-  - [C2]    Non si assume OS28 = OG11: ogni categoria è distinta
-  - [D]     Matching certificazioni STRICT: ISO 9001 ≠ OHSAS 18001 / ISO 45001
-  - [NEW]   Gate manodopera: verifica costi indicati e non soggetti a ribasso
-  - [NEW]   Gate divieto subappalto 100%
+BidPilot v4.0 — Libreria Requisiti Atomici
+Allineata alla Libreria Requisiti v2.1 (84 requisiti · R00a–R60 · D01–D23)
+Sezione A: Livelli 0–16 | Sezione E: D01–D10 | Sezione F: D11–D23
+Anti-inferenza: 16 regole (ANTI-INF-01–10, AI-SOA-01–06, AI-GR-01–06)
 """
 from __future__ import annotations
 from datetime import datetime
@@ -24,8 +20,8 @@ CLASSIFICHE_SOA: Dict[str, float] = {
     "IV": 2_065_000, "V": 3_098_000, "VI": 5_165_000,
     "VII": 10_329_000, "VIII": float("inf")
 }
-
 CLASS_RANK = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8}
+
 
 # ─────────────────────────────────────────────────────────
 # Helpers
@@ -35,29 +31,37 @@ def _today() -> datetime:
     return datetime.now()
 
 def _parse_date(s: str) -> Optional[datetime]:
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
         try:
-            return datetime.strptime(s, fmt)
+            return datetime.strptime(s[:len(fmt.replace("%Y","2024").replace("%m","01").replace("%d","01").replace("%H","00").replace("%M","00"))], fmt)
+        except Exception:
+            pass
+    # Fallback robusto
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s[:10], fmt)
         except Exception:
             pass
     return None
 
-def _ev(quote: str = "", page: int = 0, section: str = "") -> Evidence:
-    return Evidence(quote=quote, page=page, section=section)
+def _ev(quote: str = "", page: int = 0, section: str = "", confidence: float = 1.0) -> Evidence:
+    return Evidence(quote=quote, page=page, section=section, confidence=confidence)
 
 def _ok(req_id: str, name: str, cat: str, msg: str,
-        evidence: Optional[Evidence] = None) -> RequirementResult:
+        evidence: Optional[Evidence] = None, confidence: float = 1.0) -> RequirementResult:
     return RequirementResult(
         req_id=req_id, name=name, category=cat,
         status=ReqStatus.OK, severity=Severity.INFO,
         evidence=[evidence] if evidence else [],
-        user_message=msg
+        user_message=msg, confidence=confidence
     )
 
 def _ko(req_id: str, name: str, cat: str, sev: Severity, msg: str,
         fixable: bool = False, methods: List[str] = None,
         constraints: List[str] = None, gaps: List[str] = None,
-        evidence: Optional[Evidence] = None) -> RequirementResult:
+        evidence: Optional[Evidence] = None, confidence: float = 1.0) -> RequirementResult:
     return RequirementResult(
         req_id=req_id, name=name, category=cat,
         status=ReqStatus.FIXABLE if fixable else ReqStatus.KO,
@@ -69,106 +73,439 @@ def _ko(req_id: str, name: str, cat: str, sev: Severity, msg: str,
         ),
         company_gap=CompanyGap(missing_assets=gaps or []),
         evidence=[evidence] if evidence else [],
-        user_message=msg
+        user_message=msg, confidence=confidence
     )
 
 def _unknown(req_id: str, name: str, cat: str, msg: str,
-             evidence: Optional[Evidence] = None) -> RequirementResult:
+             evidence: Optional[Evidence] = None,
+             sev: Severity = Severity.SOFT_RISK) -> RequirementResult:
     return RequirementResult(
         req_id=req_id, name=name, category=cat,
-        status=ReqStatus.UNKNOWN, severity=Severity.SOFT_RISK,
+        status=ReqStatus.UNKNOWN, severity=sev,
         evidence=[evidence] if evidence else [],
-        user_message=msg
+        user_message=msg, confidence=0.7
+    )
+
+def _risk(req_id: str, name: str, cat: str, msg: str,
+          evidence: Optional[Evidence] = None) -> RequirementResult:
+    return RequirementResult(
+        req_id=req_id, name=name, category=cat,
+        status=ReqStatus.RISK_FLAG, severity=Severity.SOFT_RISK,
+        evidence=[evidence] if evidence else [],
+        user_message=msg, confidence=1.0
+    )
+
+def _premiante(req_id: str, name: str, cat: str, msg: str,
+               punti_persi: float = 0.0) -> RequirementResult:
+    """Requisito PREMIANTE — mai KO, solo perdita punti (Sezione C.2 Libreria)"""
+    return RequirementResult(
+        req_id=req_id, name=name, category=cat,
+        status=ReqStatus.PREMIANTE, severity=Severity.INFO,
+        user_message=f"[PREMIANTE] {msg} — perdita stimata: {punti_persi:.0f} punti",
+        confidence=1.0
     )
 
 
-def _required_class_from_amount(amount_eur: Optional[float]) -> Optional[str]:
+# ─────────────────────────────────────────────────────────
+# LIVELLO 0 — Classificazione documento (R00a, R00b)
+# ─────────────────────────────────────────────────────────
+
+def eval_R00a(bando: BandoRequisiti) -> RequirementResult:
+    """R00a — Tipo documento (pre-gate obbligatorio)
+    ANTI-INF-01: classificare PRIMA di qualsiasi estrazione requisiti.
     """
-    FIX v3.1 — Calcola la classifica SOA richiesta dall'importo della SINGOLA CATEGORIA
-    (non dall'importo totale del bando).
-    Es: 460.000€ → "II" (fino a 516k), NON "III".
-    """
-    if amount_eur is None:
-        return None
-    for cls, cap in sorted(CLASSIFICHE_SOA.items(), key=lambda x: CLASS_RANK[x[0]]):
-        if amount_eur <= cap:
-            return cls
-    return "VIII"
+    doc_type = bando.document_type
+    if doc_type == "richiesta_preventivo":
+        return _risk("R00a", "Tipo documento — Richiesta preventivo", "meta",
+                     "Documento = richiesta preventivo: NON applicare SOA, garanzie, DGUE come gara ordinaria. "
+                     "Engine semplificato: idoneità a presentare preventivo.")
+    if doc_type == "verbale_esito":
+        return _risk("R00a", "Tipo documento — Verbale esito", "meta",
+                     "Verbale esito: solo knowledge base, NON engine eligibility gara.")
+    if doc_type == "sistema_qualificazione":
+        return _risk("R00a", "Tipo documento — Sistema di Qualificazione", "meta",
+                     "Documento = Sistema di Qualificazione (D11): attivare engine qualificazione D12–D20.")
+    return _ok("R00a", f"Tipo documento: {doc_type}", "meta",
+               f"Documento classificato come '{doc_type}'. Engine gara ordinaria applicabile.")
+
+def eval_R00b(bando: BandoRequisiti) -> RequirementResult:
+    """R00b — Famiglia procedurale"""
+    family = bando.procedure_family
+    basis = bando.procedure_legal_basis or "N/D"
+    return _ok("R00b", f"Procedura: {family}", "meta",
+               f"Famiglia procedurale: {family} (base legale: {basis}). "
+               f"Sottoinsieme requisiti attivati di conseguenza.")
 
 
 # ─────────────────────────────────────────────────────────
-# Requisiti A — Ammissibilità generale
+# LIVELLO 1 — Gate digitali, scadenze, canali (R01–R05)
 # ─────────────────────────────────────────────────────────
 
-def eval_A1(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
+def eval_R01(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R01 — Deadline presentazione offerta"""
+    for sc in bando.scadenze:
+        if "offerta" in sc.tipo.lower() or "presentazione" in sc.tipo.lower():
+            d = _parse_date(sc.data) if sc.data else None
+            if d is None:
+                return _unknown("R01", "Deadline offerta", "procedural",
+                                f"Data scadenza offerta non parseable: '{sc.data}'. "
+                                "Verificare nel disciplinare. ANTI-INF-05: mai stimare.",
+                                sev=Severity.HARD_KO)
+            if d < _today():
+                return _ko("R01", "Deadline offerta SCADUTA", "procedural",
+                           Severity.HARD_KO,
+                           f"Scadenza offerta già passata ({sc.data}). NO_GO immediato e non sanabile.",
+                           confidence=1.0)
+            giorni = (d - _today()).days
+            msg = f"Deadline offerta: {sc.data} (tra {giorni} giorni)"
+            if giorni <= 3:
+                return _risk("R01", "Deadline offerta critica", "procedural", msg + " — URGENZA MASSIMA")
+            return _ok("R01", "Deadline offerta", "procedural", msg, confidence=1.0)
+    return _unknown("R01", "Deadline offerta", "procedural",
+                    "Data scadenza offerta non trovata nel documento. Verificare manualmente.",
+                    sev=Severity.HARD_KO)
+
+def eval_R02(bando: BandoRequisiti) -> RequirementResult:
+    """R02 — Canale invio obbligatorio"""
+    canale = bando.canale_invio
+    piatt = bando.piattaforma_gara or "N/D"
+    if canale == "unknown":
+        return _unknown("R02", "Canale di invio", "procedural",
+                        "Canale di invio obbligatorio non identificato. Verificare nel disciplinare.")
+    return _ok("R02", f"Canale: {canale}", "procedural",
+               f"Canale di invio: {canale}. Piattaforma: {piatt}")
+
+def eval_R03(bando: BandoRequisiti) -> RequirementResult:
+    """R03 — Piattaforma telematica: registrazione e abilitazione"""
+    piatt = bando.piattaforma_gara
+    if not piatt:
+        return _unknown("R03", "Piattaforma telematica", "procedural",
+                        "Piattaforma gara non identificata nel documento.")
+    msg = f"Verificare registrazione e abilitazione su {piatt}"
+    if bando.piattaforma_spid_required:
+        msg += " — SPID/domicilio digitale richiesto: verificare disponibilità."
     return RequirementResult(
-        req_id="A1", name="Cause di esclusione", category="general",
+        req_id="R03", name=f"Piattaforma {piatt}", category="procedural",
         status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
-        user_message=(
-            "Verificare assenza cause di esclusione (art. 94-98 d.lgs. 36/2023). "
-            "Richiedere autocertificazione al legale rappresentante e a tutti i soggetti indicati."
-        )
+        user_message=msg, confidence=1.0
     )
 
-def eval_A2(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
-    return RequirementResult(
-        req_id="A2", name="Patto integrità / anticollusione", category="general",
-        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
-        user_message="Verificare possibilità di sottoscrivere patto di integrità e dichiarazioni anticollusione."
-    )
-
-def eval_A5(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
-    return RequirementResult(
-        req_id="A5", name="Regolarità fiscale", category="general",
-        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
-        user_message=(
-            "Verificare posizione fiscale e DURC. "
-            "Irregolarità fiscale è causa di esclusione non sanabile."
-        )
-    )
-
-
-# ─────────────────────────────────────────────────────────
-# Requisiti B — Idoneità professionale
-# ─────────────────────────────────────────────────────────
-
-def eval_B1(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
-    cr = company.cameral_registration
-    if cr.is_registered and cr.coherence_with_tender_object == "yes":
-        return _ok("B1", "Iscrizione CCIAA", "professional",
-                   f"Impresa iscritta CCIAA (REA: {cr.rea_number}), oggetto sociale coerente.")
-    if not cr.is_registered:
-        return _ko("B1", "Iscrizione CCIAA", "professional", Severity.HARD_KO,
-                   "Impresa non risulta iscritta CCIAA. Requisito non sanabile.",
-                   gaps=["Iscrizione CCIAA"])
-    if cr.coherence_with_tender_object == "no":
-        return _ko("B1", "Iscrizione CCIAA", "professional", Severity.HARD_KO,
-                   "Oggetto sociale non coerente con l'appalto. Verificare ATECO e oggetto.",
-                   gaps=["Coerenza oggetto sociale"])
-    return _unknown("B1", "Iscrizione CCIAA", "professional",
-                    "Verificare iscrizione CCIAA e coerenza oggetto sociale con l'appalto.")
-
-def eval_B4(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
+def eval_R04(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
+    """R04 — Firma digitale e poteri di firma"""
     lr = company.legal_representative
     if not lr.has_digital_signature:
-        return _ko("B4", "Firma digitale legale rappresentante", "procedural",
+        return _ko("R04", "Firma digitale legale rappresentante", "procedural",
                    Severity.HARD_KO,
-                   "Il firmatario non dispone di firma digitale valida.",
+                   "Firma digitale mancante: impossibile firmare documenti di gara.",
                    gaps=["Firma digitale CNS/CRS"])
     if lr.signing_powers_proof == "missing":
-        return _ko("B4", "Poteri di firma", "procedural", Severity.HARD_KO,
-                   "Manca documentazione poteri firma. Allegare procura/statuto.",
+        return _ko("R04", "Poteri di firma", "procedural", Severity.HARD_KO,
+                   "Manca documentazione poteri firma (procura/statuto).",
                    gaps=["Procura o statuto con poteri firma"])
-    if lr.has_digital_signature and lr.signing_powers_proof in ("available", "unknown"):
-        return _ok("B4", "Firma digitale", "procedural",
-                   f"{lr.name} ({lr.role}) con firma digitale disponibile.")
-    return _unknown("B4", "Firma digitale", "procedural",
-                    "Verificare disponibilità firma digitale e poteri firma.")
+    return _ok("R04", "Firma digitale", "procedural",
+               f"{lr.name} ({lr.role}) con firma digitale disponibile.")
+
+def eval_R05(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R05 — Quesiti e chiarimenti (INFO)"""
+    for sc in bando.scadenze:
+        if "quesiti" in sc.tipo.lower() or "chiarimenti" in sc.tipo.lower():
+            d = _parse_date(sc.data) if sc.data else None
+            if d and d < _today():
+                return _risk("R05", "Deadline quesiti scaduta", "procedural",
+                             f"Deadline quesiti {sc.data} già scaduta: nessuna chiarificazione ufficiale possibile. "
+                             "Ambiguità su requisiti critici → RISK_FLAG.")
+            if sc.data:
+                return _ok("R05", "Deadline quesiti", "procedural",
+                           f"Termine quesiti: {sc.data}. Inviare chiarimenti entro questa data se necessario.")
+    return None
 
 
 # ─────────────────────────────────────────────────────────
-# Requisiti C — Qualificazione SOA
-# FIX v3.1: calcola classifica dall'importo categoria, non dal totale
+# LIVELLO 2 — Sopralluogo (R06)
+# ─────────────────────────────────────────────────────────
+
+def eval_R06(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R06 — Sopralluogo obbligatorio"""
+    if not bando.sopralluogo_obbligatorio:
+        return None
+    ev = _ev(quote=bando.sopralluogo_evidence or "", section="Sopralluogo")
+    for sc in bando.scadenze:
+        if "sopralluogo" in sc.tipo.lower():
+            d = _parse_date(sc.data) if sc.data else None
+            if d and d < _today():
+                return _ko("R06", "Sopralluogo obbligatorio — SCADUTO", "procedural",
+                           Severity.HARD_KO,
+                           f"Sopralluogo obbligatorio SCADUTO ({sc.data}). Partecipazione IMPOSSIBILE.",
+                           evidence=ev)
+            if sc.data:
+                return RequirementResult(
+                    req_id="R06", name="Sopralluogo obbligatorio", category="procedural",
+                    status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+                    evidence=[ev],
+                    user_message=f"Sopralluogo OBBLIGATORIO a pena di esclusione entro {sc.data}. "
+                                 "Prenotare immediatamente — attestato da allegare.",
+                    confidence=1.0
+                )
+    return RequirementResult(
+        req_id="R06", name="Sopralluogo obbligatorio", category="procedural",
+        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO, evidence=[ev],
+        user_message="Sopralluogo OBBLIGATORIO a pena di esclusione. Verificare deadline e prenotare.",
+        confidence=1.0
+    )
+
+
+# ─────────────────────────────────────────────────────────
+# LIVELLO 3 — ANAC / FVOE (R07, R08, R09)
+# ─────────────────────────────────────────────────────────
+
+def eval_R07(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R07 — Contributo ANAC (ANTI-INF-08: mai assumere senza CIG esplicito)"""
+    if bando.anac_contributo_richiesto == "no":
+        return None
+    if bando.anac_contributo_richiesto == "unknown":
+        # Se CIG presente → più probabile sia dovuto, ma non sicuro
+        if bando.codice_cig:
+            return _unknown("R07", "Contributo ANAC", "procedural",
+                            f"CIG presente ({bando.codice_cig}) ma contributo ANAC non esplicitato. "
+                            "Verificare articolo 'Contributo ANAC' nel disciplinare.",
+                            sev=Severity.HARD_KO)
+        return None   # ANTI-INF-08: senza CIG e senza riferimento → non assumere dovuto
+    return RequirementResult(
+        req_id="R07", name="Contributo ANAC", category="procedural",
+        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+        user_message="Contributo ANAC richiesto. Pagare su FVOE/pagoPA prima della scadenza offerta. "
+                     "Mancato pagamento = esclusione immediata.",
+        confidence=1.0
+    )
+
+def eval_R08(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R08 — FVOE: obbligo e completamento fascicolo"""
+    if not bando.fvoe_required:
+        return None
+    return RequirementResult(
+        req_id="R08", name="FVOE — Fascicolo Virtuale OE", category="procedural",
+        status=ReqStatus.UNKNOWN, severity=Severity.SOFT_RISK,
+        user_message="FVOE richiesto: verificare completezza del fascicolo e caricare documenti mancanti "
+                     "prima della scadenza. (Distinto dal contributo ANAC R07.)",
+        confidence=1.0
+    )
+
+def eval_R09(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R09 — Verifica post-aggiudicazione (RISK_FLAG)"""
+    # Sempre informativo
+    return _risk("R09", "Verifica requisiti post-aggiudicazione", "procedural",
+                 "Dopo l'aggiudicazione: verifica requisiti prevista. "
+                 "KO verifica → incameramento cauzione provvisoria + segnalazione ANAC. "
+                 "Assicurarsi di poter superare la verifica PRIMA di presentare offerta.")
+
+
+# ─────────────────────────────────────────────────────────
+# LIVELLO 4 — Forma di partecipazione (R10, R11, R12)
+# ─────────────────────────────────────────────────────────
+
+def eval_R10(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
+    """R10 — Soggetti ammessi (forme giuridiche)"""
+    allowed = bando.allowed_forms
+    if not allowed:
+        return _ok("R10", "Forme partecipazione", "participation",
+                   "Forme di partecipazione non specificate: tutte ammesse (default art.65 d.lgs.36/2023).")
+    forms_str = ", ".join(allowed)
+    # Singolo sempre ammesso se in lista
+    if "singolo" in allowed or not company.willing_rti:
+        return _ok("R10", "Forme partecipazione", "participation",
+                   f"Forme ammesse: {forms_str}. Partecipazione in forma singola verificata.")
+    if company.willing_rti and "RTI" in " ".join(allowed).upper():
+        return _ok("R10", "Forme partecipazione", "participation",
+                   f"Forme ammesse: {forms_str}. RTI ammesso.")
+    return _unknown("R10", "Forme partecipazione", "participation",
+                    f"Forme ammesse: {forms_str}. Verificare compatibilità con la forma di partecipazione scelta.")
+
+def eval_R11(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R11 — RTI/Consorzi: quote e requisiti minimi"""
+    if bando.rti_ammesso == "no":
+        return None
+    if bando.rti_mandataria_quota_min or bando.rti_mandante_quota_min:
+        msg = f"RTI: mandataria ≥{bando.rti_mandataria_quota_min or '?'}%, " \
+              f"mandante ≥{bando.rti_mandante_quota_min or '?'}%."
+        return _risk("R11", "RTI — Quote minime", "participation", msg + " " + (bando.rti_regole or ""))
+    return _ok("R11", "RTI — Quote", "participation",
+               f"RTI ammesso. Regole: {bando.rti_regole or 'verificare disciplinare'}")
+
+def eval_R12(bando: BandoRequisiti) -> RequirementResult:
+    """R12 — Divieto partecipazione plurima / conflitti"""
+    return RequirementResult(
+        req_id="R12", name="Divieto partecipazione plurima", category="general",
+        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+        user_message="Verificare: impresa non partecipa allo stesso lotto sia come singolo sia come "
+                     "componente RTI (violazione = esclusione immediata). Controllare controllante/controllata.",
+        confidence=1.0
+    )
+
+
+# ─────────────────────────────────────────────────────────
+# LIVELLO 5 — Requisiti generali (R13–R17)
+# ─────────────────────────────────────────────────────────
+
+def eval_R13(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R13 — DGUE obbligatorio"""
+    if not bando.dgue_required:
+        return None
+    sezioni = ", ".join(bando.dgue_sezioni_obbligatorie) if bando.dgue_sezioni_obbligatorie else "standard"
+    return RequirementResult(
+        req_id="R13", name="DGUE obbligatorio", category="general",
+        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+        user_message=f"DGUE obbligatorio. Sezioni da compilare: {sezioni}. "
+                     f"Formato: {bando.dgue_format or 'PDF/eDGUE'}. "
+                     "In RTI: DGUE per ogni membro. Mancanza spesso HARD KO non sanabile.",
+        confidence=1.0
+    )
+
+def eval_R14(bando: BandoRequisiti) -> RequirementResult:
+    """R14 — Cause di esclusione art.94-98 (UNKNOWN senza input azienda)"""
+    return RequirementResult(
+        req_id="R14", name="Cause di esclusione art.94–98", category="general",
+        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+        user_message="Verificare assenza cause di esclusione (art.94–98 d.lgs.36/2023) per: "
+                     "legale rappresentante, soci maggioritari, direttori tecnici, amministratori. "
+                     "Self-cleaning ammesso se documentato. UNKNOWN senza input azienda.",
+        confidence=0.7
+    )
+
+def eval_R15(bando: BandoRequisiti) -> RequirementResult:
+    """R15 — DURC e regolarità fiscale"""
+    return RequirementResult(
+        req_id="R15", name="Regolarità DURC e fiscale", category="general",
+        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+        user_message="Verificare DURC in corso di validità (120 giorni) e regolarità fiscale. "
+                     "DURC scaduto ma rinnovabile → GO_WITH_STRUCTURE. "
+                     "Verificare scadenza fino alla data di aggiudicazione stimata, non solo deadline offerta.",
+        confidence=0.7
+    )
+
+def eval_R16(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R16 — Protocollo legalità / patto integrità"""
+    if not bando.protocollo_legalita_required and not bando.patto_integrita_required:
+        return None
+    pena = bando.patto_integrita_pena_esclusione
+    if pena:
+        return RequirementResult(
+            req_id="R16", name="Patto integrità", category="general",
+            status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+            user_message="Patto integrità obbligatorio A PENA DI ESCLUSIONE. "
+                         "Leggere il testo: alcune SA hanno clausole stringenti (esclusiva, vincoli subappalto). "
+                         "Firma obbligatoria entro deadline.",
+            confidence=1.0
+        )
+    return _ok("R16", "Patto integrità", "general",
+               "Patto integrità/protocollo legalità richiesto: firmare e allegare (sempre soddisfabile).")
+
+def eval_R17(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R17 — Piattaforma: malfunzionamento e gestione proroga (INFO)"""
+    if not bando.piattaforma_failure_policy_exists:
+        return None
+    return _risk("R17", "Policy malfunzionamento piattaforma", "procedural",
+                 "In caso di malfunzionamento certificato: (1) screenshot con timestamp, "
+                 "(2) PEC immediata alla SA, (3) conservare log. "
+                 "Senza documentazione tempestiva: NO_GO anche con malfunzionamento.")
+
+
+# ─────────────────────────────────────────────────────────
+# LIVELLO 6 — Idoneità professionale (R18, R19)
+# ─────────────────────────────────────────────────────────
+
+def eval_R18(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
+    """R18 — Iscrizione CCIAA / coerenza oggetto sociale (ex B1)"""
+    cr = company.cameral_registration
+    if cr.is_registered and cr.coherence_with_tender_object == "yes":
+        return _ok("R18", "Iscrizione CCIAA", "professional",
+                   f"Impresa iscritta CCIAA (REA: {cr.rea_number}), oggetto sociale coerente.")
+    if not cr.is_registered:
+        return _ko("R18", "Iscrizione CCIAA", "professional", Severity.HARD_KO,
+                   "Impresa non iscritta CCIAA.", gaps=["Iscrizione CCIAA"])
+    if cr.coherence_with_tender_object == "no":
+        return _ko("R18", "CCIAA — Coerenza oggetto sociale", "professional", Severity.HARD_KO,
+                   "Oggetto sociale non coerente con l'appalto (ATECO/CPV). "
+                   "Verificare se attività svolta è dimostrabile.",
+                   fixable=True, methods=["rti"],
+                   gaps=["Coerenza oggetto sociale"])
+    return _unknown("R18", "Iscrizione CCIAA", "professional",
+                    "Verificare iscrizione CCIAA e coerenza oggetto sociale con CPV gara.")
+
+def eval_R19(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """R19 — Albi professionali e abilitazioni"""
+    if not bando.albi_professionali_required:
+        return None
+    albi_str = ", ".join(bando.albi_professionali_required)
+    company_roles = [r.role.lower() for r in company.key_roles]
+    missing = [a for a in bando.albi_professionali_required
+               if not any(a.lower() in r for r in company_roles)]
+    if not missing:
+        return _ok("R19", "Albi professionali", "professional",
+                   f"Figure professionali richieste ({albi_str}) disponibili internamente.")
+    return _ko("R19", "Albi professionali", "professional", Severity.HARD_KO,
+               f"Figure mancanti: {', '.join(missing)}. "
+               "Ingaggiare professionisti iscritti agli albi competenti.",
+               fixable=True, methods=["progettisti"],
+               gaps=missing)
+
+
+# ─────────────────────────────────────────────────────────
+# LIVELLO 7 — Economico-finanziari (R20, R21)
+# ─────────────────────────────────────────────────────────
+
+def eval_R20(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """R20 — Fatturato minimo (generale o specifico)"""
+    req = bando.fatturato_minimo_richiesto
+    if not req:
+        return None
+    recent = sorted(company.turnover_by_year, key=lambda x: x.year, reverse=True)[:bando.fatturato_anni_riferimento]
+    if not recent:
+        return _unknown("R20", "Fatturato globale minimo", "financial",
+                        f"Soglia: {req:,.0f}€. Caricare dati fatturato nel profilo.",
+                        sev=Severity.HARD_KO)
+    avg = sum(r.amount_eur for r in recent) / len(recent)
+    if avg >= req:
+        return _ok("R20", "Fatturato globale minimo", "financial",
+                   f"Fatturato medio {avg:,.0f}€ ≥ soglia {req:,.0f}€ ✓")
+    methods = []
+    if bando.avvalimento_ammesso == "yes":
+        methods.append("avvalimento")
+    if bando.rti_ammesso == "yes":
+        methods.append("rti (sommando fatturati)")
+    return _ko("R20", "Fatturato globale minimo", "financial", Severity.HARD_KO,
+               f"Fatturato medio {avg:,.0f}€ < soglia {req:,.0f}€. "
+               "In RTI: mandataria ≥40% della soglia, mandanti la differenza.",
+               fixable=bool(methods), methods=methods,
+               gaps=[f"Fatturato globale {req:,.0f}€"])
+
+def eval_R21(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """R21 — Servizi/lavori analoghi (referenze)"""
+    req_val = bando.referenze_valore_min
+    if not req_val:
+        return None
+    similar = company.similar_works
+    if not similar:
+        return _unknown("R21", "Referenze lavori/servizi analoghi", "financial",
+                        f"Soglia referenze: {req_val:,.0f}€ in {bando.referenze_anni_lookback} anni. "
+                        "Inserire opere analoghe nel profilo.",
+                        sev=Severity.HARD_KO)
+    tot = sum(w.amount_eur for w in similar)
+    if tot >= req_val:
+        return _ok("R21", "Referenze lavori analoghi", "financial",
+                   f"Referenze totali {tot:,.0f}€ ≥ soglia {req_val:,.0f}€ ✓")
+    methods = []
+    if bando.avvalimento_ammesso == "yes":
+        methods.append("avvalimento")
+    if bando.rti_ammesso == "yes":
+        methods.append("rti")
+    return _ko("R21", "Referenze lavori analoghi", "financial", Severity.HARD_KO,
+               f"Referenze {tot:,.0f}€ < soglia {req_val:,.0f}€ in {bando.referenze_anni_lookback} anni.",
+               fixable=bool(methods), methods=methods,
+               gaps=[f"Referenze analoghi {req_val:,.0f}€"])
+
+
+# ─────────────────────────────────────────────────────────
+# LIVELLO 8 — SOA e categorie lavori (R24–R29, D01–D10)
 # ─────────────────────────────────────────────────────────
 
 def _find_soa(company: CompanyProfile, category: str) -> Optional[SOAAttestation]:
@@ -181,182 +518,182 @@ def _soa_valid(att: SOAAttestation) -> bool:
     d = _parse_date(att.expiry_date)
     return d is not None and d > _today()
 
+def _check_soa_equivalence(bando: BandoRequisiti, required_cat: str,
+                           company: CompanyProfile) -> Optional[str]:
+    """D01 — Controlla se esiste equivalenza SOA esplicita nel disciplinare (AI-SOA-01)."""
+    for eq in bando.soa_equivalences:
+        if eq.to_cat.upper() == required_cat.upper():
+            att = _find_soa(company, eq.from_cat)
+            if att and _soa_valid(att):
+                return eq.from_cat
+    return None
 
-def eval_C1_prevalente(bando: BandoRequisiti, company: CompanyProfile,
-                       participation_forms: Any) -> RequirementResult:
-    """
-    C1 – Categoria prevalente.
-    FIX v3.1: usa importo_categoria (se disponibile) per determinare classifica richiesta,
-              NON l'importo totale del bando.
-    """
-    prev = None
-    for s in bando.soa_richieste:
-        if s.prevalente:
-            prev = s
-            break
+def eval_R24(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R24 — Importo base (driver di tutti i check SOA)"""
+    imp = bando.importo_lavori or bando.importo_base_gara
+    if imp is None:
+        return _unknown("R24", "Importo base gara", "qualification",
+                        "Importo base gara non trovato: tutti i calcoli SOA → UNKNOWN. "
+                        "ANTI-INF-04: non calcolare classifiche senza importo esplicito.",
+                        sev=Severity.HARD_KO)
+    # Verifica soglia SOA (ANTI-INF-09)
+    if imp < 150_000:
+        return _risk("R24", f"Importo {imp:,.0f}€ — sotto soglia SOA 150k", "qualification",
+                     f"Importo {imp:,.0f}€ < 150.000€: NON applicare check SOA. "
+                     "Applicare R27 (art.90 DPR 207/2010) o All.II.18 art.10 se beni culturali.")
+    return _ok("R24", f"Importo base {imp:,.0f}€", "qualification",
+               f"Importo base: {imp:,.0f}€. Classifiche SOA applicabili.")
+
+def eval_R25(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
+    """R25 — SOA categoria prevalente (ANTI-INF-02: literalità totale)"""
+    # Verifica soglia (ANTI-INF-09)
+    imp = bando.importo_lavori or bando.importo_base_gara
+    if imp and imp < 150_000:
+        return _ok("R25", "SOA prevalente — N/A sotto soglia", "qualification",
+                   "Importo < 150k: check SOA non applicabile. Vedi R27.")
+
+    prev = next((s for s in bando.soa_richieste if s.prevalente), None)
     if not prev and bando.soa_richieste:
         prev = bando.soa_richieste[0]
     if not prev:
-        return _unknown("C1", "SOA prevalente", "qualification",
-                        "Nessuna categoria SOA prevalente rilevata nel bando.")
+        return _unknown("R25", "SOA prevalente", "qualification",
+                        "Nessuna categoria SOA prevalente rilevata. "
+                        "ANTI-INF-02: non inferire categoria da descrizione generica.")
 
-    # ── FIX: determina classifica richiesta dall'importo della categoria ──
-    classifica_richiesta = prev.classifica  # estratta dal bando (fonte primaria)
-    if prev.importo_categoria and (not classifica_richiesta or classifica_richiesta == "?"):
-        classifica_richiesta = _required_class_from_amount(prev.importo_categoria)
-    elif prev.importo_categoria:
-        # Verifica coerenza: se l'importo suggerisce una class inferiore, usa quella corretta
-        class_da_importo = _required_class_from_amount(prev.importo_categoria)
-        if class_da_importo and CLASS_RANK.get(class_da_importo, 0) < CLASS_RANK.get(classifica_richiesta, 0):
-            # Il bando potrebbe aver indicato una classifica superiore al necessario: usa quella del bando
-            pass  # mantieni classifica_richiesta dal bando
-        # Altrimenti il bando ha già la classifica corretta
+    ev = _ev(quote=prev.evidence or "", section="Requisiti SOA", confidence=1.0)
 
-    ev = _ev(
-        quote=(prev.evidence or "") + (
-            f" [importo categoria: €{prev.importo_categoria:,.0f}]" if prev.importo_categoria else ""
-        ),
-        section="Requisiti SOA"
-    )
+    # Controlla equivalenza D01 (AI-SOA-01)
+    equiv_cat = _check_soa_equivalence(bando, prev.categoria, company)
+    if equiv_cat:
+        return _ok("R25", f"SOA {prev.categoria} (equivalenza {equiv_cat})", "qualification",
+                   f"Equivalenza SOA esplicita: {equiv_cat} ≡ {prev.categoria} ✓",
+                   evidence=ev)
+
     att = _find_soa(company, prev.categoria)
-
     if att is None:
-        fix_methods = []
-        constraints = []
-        if bando.avvalimento_ammesso == "yes":
+        fix_methods, constraints = [], []
+        if bando.avvalimento_ammesso == "yes" and prev.categoria not in bando.avvalimento_banned_categories:
             fix_methods.append("avvalimento")
             constraints.append("Ausiliaria non può partecipare alla stessa gara")
         if bando.rti_ammesso == "yes":
             fix_methods.append("rti")
-            constraints.append("In RTI Orizzontale la mandataria copre la prevalente")
-            constraints.append("Quote RTI devono rispettare le regole del bando")
-
-        importo_fmt = f"€{prev.importo_categoria:,.0f}" if prev.importo_categoria else "importo non specificato"
-        return _ko(
-            "C1", f"SOA prevalente {prev.categoria} cl.{classifica_richiesta}", "qualification",
-            Severity.HARD_KO,
-            f"SOA {prev.categoria} (categoria PREVALENTE) classifica {classifica_richiesta} NON posseduta. "
-            f"Importo categoria: {importo_fmt}. "
-            f"L'azienda ha {', '.join(a.category for a in company.soa_attestations) or 'nessuna SOA'} — "
-            f"non coprono la prevalente. Necessario avvalimento o RTI con mandataria qualificata.",
-            fixable=bool(fix_methods),
-            methods=fix_methods,
-            constraints=constraints,
-            gaps=[f"SOA {prev.categoria} cl.{classifica_richiesta}"],
-            evidence=ev
-        )
+        return _ko("R25", f"SOA prevalente {prev.categoria} cl.{prev.classifica}", "qualification",
+                   Severity.HARD_KO,
+                   f"SOA {prev.categoria} cl.{prev.classifica} NON posseduta.",
+                   fixable=bool(fix_methods), methods=fix_methods, constraints=constraints,
+                   gaps=[f"SOA {prev.categoria} cl.{prev.classifica}"], evidence=ev)
 
     if not _soa_valid(att):
-        return _ko(
-            "C1", f"SOA prevalente {prev.categoria}", "qualification",
-            Severity.HARD_KO,
-            f"SOA {prev.categoria} SCADUTA il {att.expiry_date}. Rinnovarla prima della scadenza offerta.",
-            gaps=[f"Rinnovo SOA {prev.categoria}"],
-            evidence=ev
-        )
+        return _ko("R25", f"SOA {prev.categoria} scaduta", "qualification",
+                   Severity.HARD_KO,
+                   f"SOA {prev.categoria} SCADUTA il {att.expiry_date}. Rinnovare SUBITO.",
+                   gaps=[f"Rinnovo SOA {prev.categoria}"], evidence=ev)
 
     poss_rank = CLASS_RANK.get(att.soa_class, 0)
-    req_rank = CLASS_RANK.get(classifica_richiesta, 0)
+    req_rank = CLASS_RANK.get(prev.classifica, 0)
 
     if poss_rank >= req_rank:
-        return _ok("C1", f"SOA prevalente {prev.categoria}", "qualification",
-                   f"SOA {prev.categoria} cl.{att.soa_class} ✓ "
-                   f"(copre importo categoria {f'€{prev.importo_categoria:,.0f}' if prev.importo_categoria else '?'}; "
-                   f"scad. {att.expiry_date})", evidence=ev)
-    else:
-        fix_methods = []
-        if bando.avvalimento_ammesso == "yes":
-            fix_methods.append("avvalimento")
-        if bando.rti_ammesso == "yes":
-            fix_methods.append("rti")
-        importo_fmt = f"€{prev.importo_categoria:,.0f}" if prev.importo_categoria else "?"
-        return _ko(
-            "C1", f"SOA prevalente {prev.categoria}", "qualification",
-            Severity.HARD_KO,
-            f"SOA {prev.categoria} posseduta cl.{att.soa_class} < richiesta cl.{classifica_richiesta}. "
-            f"Importo categoria: {importo_fmt}. Gap da colmare.",
-            fixable=bool(fix_methods),
-            methods=fix_methods,
-            constraints=["Contratto avvalimento con risorse esplicite"],
-            gaps=[f"SOA {prev.categoria} cl.{classifica_richiesta}"],
-            evidence=ev
-        )
+        # Verifica +1/5 se presente (D02, AI-SOA-02)
+        note = ""
+        if bando.soa_fifth_increase_allowed:
+            note = f" [Regola +1/5 applicabile: classifica copre fino a {CLASSIFICHE_SOA.get(att.soa_class, 0)*1.2:,.0f}€]"
+        return _ok("R25", f"SOA prevalente {prev.categoria}", "qualification",
+                   f"SOA {prev.categoria} cl.{att.soa_class} ✓ (scad. {att.expiry_date}){note}",
+                   evidence=ev)
 
+    fix_methods = []
+    if bando.avvalimento_ammesso == "yes" and prev.categoria not in bando.avvalimento_banned_categories:
+        fix_methods.append("avvalimento")
+    if bando.rti_ammesso == "yes":
+        fix_methods.append("rti")
+    return _ko("R25", f"SOA prevalente {prev.categoria}", "qualification",
+               Severity.HARD_KO,
+               f"SOA {prev.categoria} posseduta cl.{att.soa_class} < richiesta cl.{prev.classifica}.",
+               fixable=bool(fix_methods), methods=fix_methods,
+               constraints=["Contratto avvalimento con risorse esplicite"],
+               gaps=[f"SOA {prev.categoria} cl.{prev.classifica}"], evidence=ev)
 
-def eval_C2_scorporabili(bando: BandoRequisiti, company: CompanyProfile) -> List[RequirementResult]:
-    """
-    C2 – Categorie scorporabili.
-    FIX v3.1:
-    - Usa importo_categoria per calcolare classifica richiesta (non importo totale)
-    - Non assume equivalenze tra categorie (OS28 ≠ OG11, OS30 ≠ OG11)
-    - Se azienda ha scorporabili ma non la prevalente → suggerisce RTI Orizzontale specifico
-    - Segnala se categoria è "inferred" (non esplicitamente citata nel bando)
-    """
+def eval_R26_scorporabili(bando: BandoRequisiti, company: CompanyProfile) -> List[RequirementResult]:
+    """R26 — Categorie scorporabili (D03, D04)"""
     results = []
     scorp = [s for s in bando.soa_richieste if not s.prevalente]
-
-    # Verifica se l'azienda manca della prevalente (per suggerimento RTI Orizzontale)
-    prev = next((s for s in bando.soa_richieste if s.prevalente), None)
-    company_has_prevalente = prev is not None and _find_soa(company, prev.categoria) is not None
-
     for s in scorp:
-        # ── FIX: classifica dall'importo della categoria scorporabile ──
-        classifica_richiesta = s.classifica
-        if s.importo_categoria and (not classifica_richiesta or classifica_richiesta == "?"):
-            classifica_richiesta = _required_class_from_amount(s.importo_categoria)
+        ev = _ev(quote=s.evidence or "", section="Categorie lavori")
+        req_id = f"R26_{s.categoria}"
 
-        ev_quote = s.evidence or ""
-        if getattr(s, 'inferred', False):
-            ev_quote += f" [NOTA: categoria '{s.categoria}' identificata per inferenza — verificare nel bando]"
-        importo_fmt = f"€{s.importo_categoria:,.0f}" if s.importo_categoria else "importo n.d."
-
-        ev = _ev(quote=ev_quote, section="Categorie lavori")
-        req_id = f"C2_{s.categoria}"
+        # Equivalenza D01
+        equiv_cat = _check_soa_equivalence(bando, s.categoria, company)
+        if equiv_cat:
+            results.append(_ok(req_id, f"SOA scorporabile {s.categoria} (equiv. {equiv_cat})",
+                               "qualification", f"Equivalenza: {equiv_cat} ≡ {s.categoria} ✓", evidence=ev))
+            continue
 
         att = _find_soa(company, s.categoria)
+        has_soa = att and _soa_valid(att) and CLASS_RANK.get(att.soa_class, 0) >= CLASS_RANK.get(s.classifica, 0)
 
-        if att and _soa_valid(att) and CLASS_RANK.get(att.soa_class, 0) >= CLASS_RANK.get(classifica_richiesta, 0):
-            results.append(_ok(
-                req_id, f"SOA scorporabile {s.categoria}", "qualification",
-                f"SOA {s.categoria} cl.{att.soa_class} ✓ ({importo_fmt})", evidence=ev
-            ))
+        if has_soa:
+            results.append(_ok(req_id, f"SOA scorporabile {s.categoria}", "qualification",
+                               f"SOA {s.categoria} cl.{att.soa_class} ✓", evidence=ev))
         else:
             methods = []
-            constraints = []
-            if bando.subappalto_percentuale_max and bando.subappalto_percentuale_max > 0:
-                methods.append("subappalto")
-            if bando.avvalimento_ammesso == "yes":
+            if s.subappaltabile_100 or (bando.subappalto_percentuale_max and bando.subappalto_percentuale_max > 0):
+                # D03: verifica dichiarazione obbligatoria non sanabile
+                if bando.subappalto_qualificante_dichiarazione_pena_esclusione:
+                    methods.append("subappalto_qualificante [DICHIARAZIONE OBBLIGATORIA A PENA ESCLUSIONE]")
+                else:
+                    methods.append("subappalto_qualificante")
+            if bando.avvalimento_ammesso == "yes" and s.categoria not in bando.avvalimento_banned_categories:
                 methods.append("avvalimento")
             if bando.rti_ammesso == "yes":
                 methods.append("rti")
-
-            # ── FIX: distinzione Prevalente vs Scorporabile nel messaggio ──
-            if not company_has_prevalente and bando.rti_ammesso == "yes":
-                rti_note = (
-                    " ⚠️ Attenzione: l'azienda NON possiede nemmeno la SOA prevalente — "
-                    "in un RTI Orizzontale un'altra mandataria copre la prevalente "
-                    f"e l'azienda copre questa scorporabile ({s.categoria}) come mandante."
-                )
-            else:
-                rti_note = ""
-
-            missing_note = f"SOA {s.categoria} cl.{classifica_richiesta}"
-            results.append(_ko(
-                req_id, f"SOA scorporabile {s.categoria}", "qualification",
-                Severity.HARD_KO,
-                f"SOA scorporabile {s.categoria} cl.{classifica_richiesta} mancante/insufficiente "
-                f"({importo_fmt}).{rti_note}",
-                fixable=bool(methods),
-                methods=methods,
-                constraints=constraints,
-                gaps=[missing_note],
-                evidence=ev
-            ))
+            results.append(_ko(req_id, f"SOA scorporabile {s.categoria}", "qualification",
+                               Severity.HARD_KO,
+                               f"SOA {s.categoria} cl.{s.classifica} mancante. "
+                               + ("Subappaltabile 100%: dichiarare in DGUE. " if s.subappaltabile_100 else ""),
+                               fixable=bool(methods), methods=methods,
+                               gaps=[f"SOA {s.categoria} cl.{s.classifica}"], evidence=ev))
     return results
 
+def eval_R27(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R27 — Alt. qualificazione art.90 / All.II.18 (sotto soglia 150k)"""
+    imp = bando.importo_lavori or bando.importo_base_gara
+    if not imp or imp >= 150_000:
+        return None
+    if not bando.alt_qualification_allowed:
+        return _unknown("R27", "Qualificazione alternativa (sotto soglia)", "qualification",
+                        "Importo < 150k: verificare se art.90 DPR 207/2010 o All.II.18 art.10 è applicabile.",
+                        sev=Severity.HARD_KO)
+    alt_type = bando.alt_qualification_type or "art90"
+    # AI-SOA-04: i due framework sono separati
+    return _ok("R27", f"Qualificazione alternativa ({alt_type})", "qualification",
+               f"Qualificazione alternativa {alt_type} applicabile (importo {imp:,.0f}€ < 150k).")
 
-def eval_C5_validita(bando: BandoRequisiti, company: CompanyProfile) -> List[RequirementResult]:
-    """C5 – Validità temporale SOA"""
+def eval_R28_iso(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """R28 — ISO 9001 (legato a SOA ≥ III o esplicito)"""
+    if "ISO 9001" not in bando.certificazioni_richieste and "ISO9001" not in bando.certificazioni_richieste:
+        return None
+    return eval_D_certificazioni(bando, company)  # delega alla funzione certificazioni
+
+def eval_R27_alt_culturale(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D07 — Qualificazione alternativa beni culturali All.II.18 art.10"""
+    if bando.alt_qualification_type != "art10_allII18":
+        return None
+    return _risk("D07", "Qualificazione All.II.18 art.10 (beni culturali)", "qualification",
+                 "Qualificazione beni culturali: 5 requisiti art.10 (lavori categoria, continuità, "
+                 "direttore tecnico, organico, CCIAA). NON usare art.90 DPR 207/2010 come fallback. "
+                 "AI-SOA-04: framework separati.")
+
+def eval_R29_accordo_quadro(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R29 — Accordo Quadro"""
+    if not bando.is_accordo_quadro:
+        return None
+    return _risk("R29", "Accordo Quadro — Regole speciali", "qualification",
+                 "AQ: requisiti SOA per categorie del perimetro (non progetto esecutivo specifico). "
+                 "Verificare se ordini attuativi richiedono SOA ulteriori. "
+                 "Aggiudicazione cascading o rotazione: verificare.")
+
+def eval_R28_soa_validita(bando: BandoRequisiti, company: CompanyProfile) -> List[RequirementResult]:
+    """C5/R28 — Validità temporale SOA (incluso D08: copia obbligatoria)"""
     results = []
     deadline_offerta = None
     for sc in bando.scadenze:
@@ -366,420 +703,684 @@ def eval_C5_validita(bando: BandoRequisiti, company: CompanyProfile) -> List[Req
 
     for att in company.soa_attestations:
         exp = _parse_date(att.expiry_date)
+        req_id = f"C5_{att.category}"
         if exp is None:
-            results.append(_unknown(
-                f"C5_{att.category}", f"Validità SOA {att.category}", "qualification",
-                f"Data scadenza SOA {att.category} non leggibile: '{att.expiry_date}'"
-            ))
+            results.append(_unknown(req_id, f"Validità SOA {att.category}", "qualification",
+                                    f"Data scadenza SOA {att.category} non leggibile: '{att.expiry_date}'"))
         elif exp < _today():
-            results.append(_ko(
-                f"C5_{att.category}", f"SOA {att.category} scaduta", "qualification",
-                Severity.HARD_KO,
-                f"SOA {att.category} SCADUTA il {att.expiry_date}. Rinnovare immediatamente.",
-                gaps=[f"Rinnovo SOA {att.category}"]
-            ))
+            results.append(_ko(req_id, f"SOA {att.category} SCADUTA", "qualification",
+                               Severity.HARD_KO,
+                               f"SOA {att.category} SCADUTA il {att.expiry_date}. Rinnovare immediatamente.",
+                               gaps=[f"Rinnovo SOA {att.category}"]))
         elif deadline_offerta and exp < deadline_offerta:
-            results.append(_ko(
-                f"C5_{att.category}", f"SOA {att.category} scade prima dell'offerta", "qualification",
-                Severity.HARD_KO,
-                f"SOA {att.category} scade il {att.expiry_date}, PRIMA della scadenza offerta "
-                f"({deadline_offerta.date()}). Avviare rinnovo anticipato.",
-                gaps=[f"Rinnovo anticipato SOA {att.category}"]
-            ))
+            results.append(_ko(req_id, f"SOA {att.category} scade prima dell'offerta", "qualification",
+                               Severity.HARD_KO,
+                               f"SOA {att.category} scade {att.expiry_date}, PRIMA della deadline ({deadline_offerta.date()}). "
+                               "Avviare rinnovo urgente. (D08: SOA deve essere valida alla data scadenza offerta.)",
+                               gaps=[f"Rinnovo SOA {att.category}"]))
         else:
-            results.append(_ok(
-                f"C5_{att.category}", f"Validità SOA {att.category}", "qualification",
-                f"SOA {att.category} valida fino al {att.expiry_date}"
-            ))
+            results.append(_ok(req_id, f"Validità SOA {att.category}", "qualification",
+                               f"SOA {att.category} valida fino al {att.expiry_date}"))
+
+    # D08 — Copia SOA obbligatoria a pena esclusione
+    if bando.soa_copy_required_pena_esclusione:
+        results.append(RequirementResult(
+            req_id="D08", name="Copia SOA obbligatoria (pena esclusione)", category="qualification",
+            status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+            user_message="Allegare copia attestato SOA PENA DI ESCLUSIONE. "
+                         "In RTI: verificare se ogni membro deve firmare digitalmente o solo mandataria.",
+            confidence=1.0
+        ))
     return results
 
 
 # ─────────────────────────────────────────────────────────
-# Requisiti D — Certificazioni
-# FIX v3.1: matching STRICT — ISO 9001 ≠ OHSAS 18001 / ISO 45001
+# LIVELLO 8 — D01–D10: SOA Differenzianti
 # ─────────────────────────────────────────────────────────
 
-# Normalizzazione e sinonimi accettati
-_CERT_SYNONYMS: Dict[str, List[str]] = {
-    "iso9001":    ["iso9001", "iso 9001", "9001"],
-    "iso14001":   ["iso14001", "iso 14001", "14001"],
-    "iso45001":   ["iso45001", "iso 45001", "45001"],
-    "ohsas18001": ["ohsas18001", "ohsas 18001", "18001", "bs ohsas 18001"],
-    "iso50001":   ["iso50001", "iso 50001", "50001"],
-    "sa8000":     ["sa8000", "sa 8000"],
-}
-
-# Qual normativa soddisfa la richiesta (es: ISO 45001 accetta anche OHSAS 18001 e viceversa)
-_CERT_EQUIVALENCES: Dict[str, List[str]] = {
-    "iso45001": ["ohsas18001"],
-    "ohsas18001": ["iso45001"],
-}
-
-def _normalize_cert(s: str) -> str:
-    return s.lower().replace(" ", "").replace("-", "").replace(":", "")
-
-def _cert_key(s: str) -> Optional[str]:
-    """Restituisce la chiave canonica di una certificazione, None se sconosciuta."""
-    n = _normalize_cert(s)
-    for key, synonyms in _CERT_SYNONYMS.items():
-        if any(_normalize_cert(syn) in n or n in _normalize_cert(syn) for syn in synonyms):
-            return key
-    return n  # fallback: usa la stringa normalizzata
-
-def _find_cert_strict(company: CompanyProfile, cert_req: str):
-    """
-    FIX v3.1 — Match STRICT tra certificazioni.
-    ISO 9001 NON soddisfa OHSAS 18001 o ISO 45001.
-    Ammette solo sinonimi/equivalenze esplicitamente dichiarate.
-    """
-    req_key = _cert_key(cert_req)
-    equivalents = {req_key} | set(_CERT_EQUIVALENCES.get(req_key, []))
-    for c in company.certifications:
-        company_key = _cert_key(c.cert_type)
-        if company_key in equivalents:
-            return c
-    return None
-
-
-def eval_D_certificazioni(bando: BandoRequisiti, company: CompanyProfile) -> List[RequirementResult]:
-    """D1-Dn – Certificazioni richieste (con matching STRICT)"""
-    results = []
-    for i, cert_req in enumerate(bando.certificazioni_richieste):
-        req_id = f"D{i+1}"
-        found = _find_cert_strict(company, cert_req)
-        if not found:
-            # Verifica se l'azienda ha una cert SIMILE ma diversa (falso positivo da evitare)
-            similar_note = ""
-            req_key = _cert_key(cert_req)
-            for c in company.certifications:
-                co_key = _cert_key(c.cert_type)
-                # Es: richiesta ISO 45001, azienda ha ISO 9001 → segnala esplicitamente il gap
-                if co_key != req_key and _normalize_cert(c.cert_type)[:3] == _normalize_cert(cert_req)[:3]:
-                    similar_note = (
-                        f" ATTENZIONE: l'azienda ha '{c.cert_type}' ma questa NON soddisfa '{cert_req}' "
-                        "(sono certificazioni distinte con scope diverso)."
-                    )
-                    break
-            results.append(_ko(
-                req_id, f"Certificazione {cert_req}", "certification",
-                Severity.HARD_KO,
-                f"'{cert_req}' NON posseduta.{similar_note} Verificare se ottenibile prima della scadenza.",
-                gaps=[cert_req]
-            ))
-        else:
-            exp = _parse_date(found.expiry_date) if found.expiry_date else None
-            if exp and exp < _today():
-                results.append(_ko(
-                    req_id, f"Certificazione {cert_req}", "certification",
-                    Severity.HARD_KO,
-                    f"'{cert_req}' SCADUTA il {found.expiry_date}. Rinnovare subito.",
-                    gaps=[f"Rinnovo {cert_req}"]
-                ))
-            else:
-                results.append(_ok(
-                    req_id, f"Certificazione {cert_req}", "certification",
-                    f"'{cert_req}' presente ({found.cert_type}) e valida (scad. {found.expiry_date})"
-                ))
-    return results
-
-
-# ─────────────────────────────────────────────────────────
-# Requisiti E — Economico-finanziari
-# ─────────────────────────────────────────────────────────
-
-def eval_E1_fatturato(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    req = bando.fatturato_minimo_richiesto
-    if not req:
+def eval_D02(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D02 — Regola +1/5 classifica SOA (AI-SOA-02: non applicare senza evidenza testuale)"""
+    if bando.soa_fifth_increase_allowed is None:
+        return None   # Non citata → non applicare
+    if not bando.soa_fifth_increase_allowed:
         return None
-    recent = sorted(company.turnover_by_year, key=lambda x: x.year, reverse=True)[:3]
-    if not recent:
-        return _unknown("E1", "Fatturato globale minimo", "financial",
-                        f"Soglia richiesta: {req:,.0f}€. Caricare dati fatturato nel profilo.")
-    avg = sum(r.amount_eur for r in recent) / len(recent)
-    if avg >= req:
-        return _ok("E1", "Fatturato globale minimo", "financial",
-                   f"Fatturato medio {avg:,.0f}€ ≥ soglia {req:,.0f}€ ✓")
-    methods = []
-    if bando.avvalimento_ammesso == "yes":
-        methods.append("avvalimento")
-    if bando.rti_ammesso == "yes":
-        methods.append("rti")
-    return _ko(
-        "E1", "Fatturato globale minimo", "financial", Severity.HARD_KO,
-        f"Fatturato medio {avg:,.0f}€ < soglia richiesta {req:,.0f}€",
-        fixable=bool(methods), methods=methods,
-        gaps=[f"Fatturato globale minimo {req:,.0f}€"]
-    )
+    return _risk("D02", "Regola +1/5 classifica SOA", "qualification",
+                 "Regola incremento quinto classifica SOA esplicitamente citata. "
+                 "In RTI: ogni impresa deve coprire almeno 1/5 dell'importo (se indicato).")
 
-def eval_E2_fatturato_specifico(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    req = bando.fatturato_specifico_richiesto
-    if not req:
+def eval_D05(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """D05 — Beni culturali OG2: divieto avvalimento art.132 (AI-SOA-05)"""
+    if not bando.avvalimento_banned_categories:
         return None
-    recent = sorted(company.sector_turnover_by_year, key=lambda x: x.year, reverse=True)[:3]
-    if not recent:
-        return _unknown("E2", "Fatturato specifico settore", "financial",
-                        f"Soglia settore richiesta: {req:,.0f}€. Caricare dati nel profilo.")
-    avg = sum(r.amount_eur for r in recent) / len(recent)
-    if avg >= req:
-        return _ok("E2", "Fatturato specifico settore", "financial",
-                   f"Fatturato settore medio {avg:,.0f}€ ≥ soglia {req:,.0f}€ ✓")
-    methods = ["avvalimento"] if bando.avvalimento_ammesso == "yes" else []
-    return _ko(
-        "E2", "Fatturato specifico settore", "financial", Severity.HARD_KO,
-        f"Fatturato settore medio {avg:,.0f}€ < soglia {req:,.0f}€",
-        fixable=bool(methods), methods=methods,
-        gaps=[f"Fatturato settore {req:,.0f}€"]
-    )
-
-
-# ─────────────────────────────────────────────────────────
-# Requisiti G — Progettazione
-# ─────────────────────────────────────────────────────────
-
-def eval_G1_appalto_integrato(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    if not bando.appalto_integrato:
+    banned = [c for c in bando.avvalimento_banned_categories if c.upper() in ("OG2", "OS2A", "OS2B")]
+    if not banned:
         return None
-    ev = _ev(quote=bando.appalto_integrato_evidence or "", section="Descrizione appalto")
-    if company.has_inhouse_design:
-        return _ok("G1", "Progettazione (appalto integrato)", "design",
-                   "Capacità progettuale interna disponibile.", evidence=ev)
-    if company.external_designers_available == "yes" and company.design_team:
-        return _ok("G1", "Progettazione (appalto integrato)", "design",
-                   f"Progettisti esterni disponibili: {len(company.design_team)} figure.", evidence=ev)
-    if company.willing_rti or company.external_designers_available != "no":
-        return _ko(
-            "G1", "Progettazione (appalto integrato)", "design",
-            Severity.HARD_KO,
-            "Appalto integrato rilevato: necessari progettisti qualificati.",
-            fixable=True,
-            methods=["progettisti"],
-            constraints=["Iscritti all'albo", "Indicazione nominativa obbligatoria"],
-            gaps=["Gruppo di progettazione"],
-            evidence=ev
-        )
-    return _ko(
-        "G1", "Progettazione (appalto integrato)", "design",
-        Severity.HARD_KO,
-        "Appalto integrato: nessun progettista disponibile. KO non colmabile senza struttura.",
-        evidence=ev
-    )
+    # Verifica se l'OE ha la SOA richiesta
+    missing_og2 = [c for c in banned if not _find_soa(company, c)]
+    if missing_og2:
+        # Avvalimento vietato per OG2: NO_GO se manca e nessuna alternativa
+        fix_methods = []
+        if bando.rti_ammesso == "yes":
+            fix_methods.append("rti")
+        if bando.subappalto_qualificante_ammesso == "yes":
+            fix_methods.append("subappalto_qualificante")
+        return _ko("D05", f"SOA OG2/culturali — avvalimento vietato (art.132)", "qualification",
+                   Severity.HARD_KO,
+                   f"Avvalimento vietato ex art.132 per {', '.join(missing_og2)}. "
+                   "AI-SOA-05: vale SOLO per questa gara specifica.",
+                   fixable=bool(fix_methods), methods=fix_methods,
+                   gaps=missing_og2)
+    return _ok("D05", "SOA beni culturali OG2", "qualification",
+               f"SOA {', '.join(banned)} presente: divieto avvalimento art.132 non impatta.")
 
-def eval_G4_giovane_professionista(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    if bando.giovane_professionista_richiesto != "yes":
+def eval_D06(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D06 — DM 154/2017 qualificazione speciale beni culturali"""
+    if not bando.cultural_works_dm154_required:
         return None
-    for d in company.design_team:
-        if d.young_professional == "yes":
-            return _ok("G4", "Giovane professionista", "design",
-                       f"{d.name} soddisfa il requisito 'giovane professionista'.")
-    return _ko(
-        "G4", "Giovane professionista", "design", Severity.HARD_KO,
-        "Bando richiede giovane professionista (abilitato < 5 anni): nessuno disponibile.",
-        fixable=True, methods=["progettisti"],
-        gaps=["Giovane professionista abilitato"]
-    )
-
-
-# ─────────────────────────────────────────────────────────
-# Requisiti H — Gate procedurali
-# ─────────────────────────────────────────────────────────
-
-def eval_H1_sopralluogo(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    if not bando.sopralluogo_obbligatorio:
-        return None
-    ev = _ev(quote=bando.sopralluogo_evidence or "", section="Modalità partecipazione")
-    deadline_text = ""
-    for sc in bando.scadenze:
-        if "sopralluogo" in sc.tipo.lower():
-            deadline_text = f" entro il {sc.data}" if sc.data else ""
-            if sc.data:
-                d = _parse_date(sc.data)
-                if d and d < _today():
-                    return _ko(
-                        "H1", "Sopralluogo obbligatorio", "procedural",
-                        Severity.HARD_KO,
-                        f"Sopralluogo obbligatorio: SCADUTO il {sc.data}. Partecipazione IMPOSSIBILE.",
-                        evidence=ev
-                    )
-            break
-    return RequirementResult(
-        req_id="H1", name="Sopralluogo obbligatorio", category="procedural",
-        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
-        evidence=[ev],
-        user_message=(
-            f"Sopralluogo OBBLIGATORIO a pena di esclusione{deadline_text}. "
-            "Prenotare immediatamente e assicurarsi di ricevere l'attestato."
-        )
-    )
-
-def eval_H4_anac(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
-    if bando.anac_contributo_richiesto == "no":
-        return None
-    if bando.anac_contributo_richiesto == "unknown":
-        return _unknown("H4", "Contributo ANAC", "procedural",
-                        "Verificare se richiesto contributo ANAC e pagarlo prima della scadenza.")
-    return RequirementResult(
-        req_id="H4", name="Contributo ANAC", category="procedural",
-        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
-        user_message=(
-            "Contributo ANAC richiesto. Pagare su FVOE prima della scadenza offerta. "
-            "Mancato pagamento = esclusione."
-        )
-    )
-
-def eval_H5_piattaforma(bando: BandoRequisiti, company: CompanyProfile) -> RequirementResult:
-    piatt = bando.piattaforma_gara or "non specificata"
-    lr = company.legal_representative
-    if not lr.has_digital_signature:
-        return _ko(
-            "H5", f"Piattaforma {piatt}", "procedural",
-            Severity.HARD_KO,
-            f"Piattaforma: {piatt}. Firma digitale mancante.",
-            gaps=["Firma digitale CNS/CRS"]
-        )
-    return RequirementResult(
-        req_id="H5", name=f"Piattaforma {piatt}", category="procedural",
-        status=ReqStatus.UNKNOWN, severity=Severity.SOFT_RISK,
-        user_message=f"Verificare registrazione su {piatt} e abilitazione alla gara specifica."
-    )
-
-
-# ─────────────────────────────────────────────────────────
-# NEW v3.1 — Gate Manodopera
-# ─────────────────────────────────────────────────────────
-
-def eval_H_manodopera(bando: BandoRequisiti) -> Optional[RequirementResult]:
-    """
-    NEW v3.1 — Verifica costi della manodopera.
-    Controlla se sono indicati e se non sono soggetti a ribasso (art. 41 c.14 d.lgs. 36/2023).
-    """
-    if not bando.costi_manodopera_indicati:
+    if bando.cultural_works_dm154_pena_esclusione:
         return RequirementResult(
-            req_id="H_MANODOPERA", name="Costi della Manodopera", category="procedural",
-            status=ReqStatus.UNKNOWN, severity=Severity.SOFT_RISK,
-            user_message=(
-                "Verificare che il bando indichi i COSTI DELLA MANODOPERA separatamente "
-                "(art. 41 c.14 d.lgs. 36/2023). Non devono essere soggetti a ribasso. "
-                "Se non indicati nel bando, segnalare alla stazione appaltante."
-            )
+            req_id="D06", name="DM 154/2017 qualificazione beni culturali", category="qualification",
+            status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+            user_message="Qualificazione DM 154/2017 obbligatoria A PENA DI ESCLUSIONE. "
+                         "Distinta da SOA OG2: possibile avere SOA OG2 senza DM 154. Verificare.",
+            confidence=1.0
         )
-    if bando.costi_manodopera_soggetti_ribasso:
-        return _ko(
-            "H_MANODOPERA", "Costi della Manodopera soggetti a ribasso", "procedural",
-            Severity.SOFT_RISK,
-            f"ATTENZIONE: il bando indica costi manodopera pari a "
-            f"€{bando.costi_manodopera_eur:,.0f} MA li assoggetta a ribasso — "
-            "ciò è vietato dall'art. 41 c.14 d.lgs. 36/2023. "
-            "Valutare segnalazione o richiesta chiarimento.",
-            fixable=False,
-            gaps=["Chiarimento su ribasso costi manodopera"]
-        )
-    importo_str = (
-        f"€{bando.costi_manodopera_eur:,.0f}" if bando.costi_manodopera_eur else "importo n.d."
-    )
-    return _ok(
-        "H_MANODOPERA", "Costi della Manodopera", "procedural",
-        f"Costi manodopera indicati ({importo_str}), non soggetti a ribasso ✓"
-    )
+    return _unknown("D06", "DM 154/2017 beni culturali", "qualification",
+                    "DM 154/2017 richiesto (non pena esclusione): verificare possesso.")
 
-
-# ─────────────────────────────────────────────────────────
-# NEW v3.1 — Gate Divieto Subappalto
-# ─────────────────────────────────────────────────────────
-
-def eval_H_divieto_subappalto(bando: BandoRequisiti) -> Optional[RequirementResult]:
-    """
-    NEW v3.1 — Verifica se alcune lavorazioni sono vietate al subappalto al 100%.
-    """
-    if not bando.subappalto_vietato_categorie:
+def eval_D09(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D09 — Lotti: vincolo aggiudicazione massima (STRATEGY)"""
+    if not bando.lots_max_awardable_per_bidder or bando.lotti <= 1:
         return None
+    return _risk("D09", f"Lotti: max {bando.lots_max_awardable_per_bidder} aggiudicazione", "procedural",
+                 f"STRATEGY FLAG: in {bando.lotti} lotti, max aggiudicabile = {bando.lots_max_awardable_per_bidder}. "
+                 "Scegliere il lotto target strategico (migliore margine/meno concorrenza). "
+                 + ("Dichiarazione di priorità obbligatoria." if bando.lots_priority_declaration_required else ""))
+
+def eval_D10(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """D10 — Patente a crediti sicurezza cantieri (AI-SOA-06: trigger letterale)"""
+    cl = bando.credit_license
+    if not cl or not cl.required:
+        return None
+    trigger = cl.trigger_condition or "non specificato"
+    # Verifica se l'OE ha SOA ≥ III (trigger tipico)
+    has_soa_iii = any(
+        CLASS_RANK.get(att.soa_class, 0) >= 3 and _soa_valid(att)
+        for att in company.soa_attestations
+    )
+    if cl.trigger_soa_class_threshold == "III" and has_soa_iii:
+        return _ok("D10", "Patente a crediti — N/A (SOA ≥ III)", "qualification",
+                   "Patente a crediti: trigger 'SOA < III'. OE con SOA ≥ III non soggetta.")
+
+    if cl.pena_esclusione:
+        if company.has_credit_license == "yes" or company.credit_license_requested:
+            return _ok("D10", "Patente a crediti", "qualification",
+                       "Patente a crediti: disponibile o richiesta ✓")
+        return _ko("D10", "Patente a crediti mancante (pena esclusione)", "qualification",
+                   Severity.HARD_KO,
+                   f"Patente a crediti obbligatoria A PENA ESCLUSIONE. Trigger: '{trigger}'. "
+                   "Presentare richiesta PRIMA della scadenza offerta.",
+                   gaps=["Patente a crediti — presentare richiesta"])
+
     return RequirementResult(
-        req_id="H_SUBAPPALTO_VIETATO", name="Divieto subappalto specifiche categorie",
-        category="procedural",
+        req_id="D10", name="Patente a crediti", category="qualification",
         status=ReqStatus.UNKNOWN, severity=Severity.SOFT_RISK,
-        user_message=(
-            f"ATTENZIONE: il bando vieta il subappalto per le seguenti categorie: "
-            f"{', '.join(bando.subappalto_vietato_categorie)}. "
-            "L'azienda deve eseguire direttamente queste lavorazioni o averle coperte da SOA propria."
-        )
+        user_message=f"Patente a crediti richiesta. Trigger: '{trigger}'. "
+                     "Verificare se si possiede o se va richiesta.",
+        confidence=0.7  # trigger spesso ambiguo
     )
 
 
 # ─────────────────────────────────────────────────────────
-# Requisiti I — Garanzie
+# LIVELLO 9 — Garanzie (R30, R31, R32)
 # ─────────────────────────────────────────────────────────
 
-def eval_I1_provvisoria(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+def eval_R30(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """R30 — Garanzia provvisoria"""
     if bando.garanzie_richieste is None:
         return None
     g = bando.garanzie_richieste
     if g.provvisoria is None and g.percentuale_provvisoria is None:
         return None
     imp = g.provvisoria
-    if imp is None and g.percentuale_provvisoria and bando.importo_lavori:
-        imp = bando.importo_lavori * g.percentuale_provvisoria / 100
-    msg = f"Cauzione provvisoria richiesta: {imp:,.0f}€" if imp else "Cauzione provvisoria richiesta"
-    has_iso9001 = any(_cert_key(c.cert_type) == "iso9001" for c in company.certifications)
+    if imp is None and g.percentuale_provvisoria and (bando.importo_lavori or bando.importo_base_gara):
+        imp = (bando.importo_lavori or bando.importo_base_gara) * g.percentuale_provvisoria / 100
+    msg = f"Cauzione provvisoria: {imp:,.0f}€" if imp else "Cauzione provvisoria richiesta"
+    has_iso9001 = any(c.cert_type.upper().replace(" ", "") in ("ISO9001", "ISO 9001")
+                      for c in company.certifications)
     if has_iso9001:
-        msg += " (riduzione 50% per ISO 9001 applicabile)"
+        riduz = imp * 0.5 if imp else None
+        msg += f" (riduzione 50% per ISO 9001 → {riduz:,.0f}€)" if riduz else " (riduzione 50% per ISO 9001)"
     return RequirementResult(
-        req_id="I1", name="Cauzione provvisoria", category="guarantee",
+        req_id="R30", name="Garanzia provvisoria", category="guarantee",
         status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
-        user_message=msg + ". Attivare fideiussione presso istituto abilitato entro scadenza."
+        user_message=msg + ". Attivare fideiussione bancaria/assicurativa entro scadenza.",
+        confidence=1.0
     )
 
+def eval_R31_R32(bando: BandoRequisiti) -> List[RequirementResult]:
+    """R31/R32 — Cauzione definitiva e polizze (STRUCTURE pre-stipula)"""
+    results = []
+    g = bando.garanzie_richieste
+    if g and g.definitiva:
+        results.append(_risk("R31", f"Cauzione definitiva {g.definitiva:,.0f}€", "guarantee",
+                             "Cauzione definitiva richiesta prima della stipula (non KO in ammissione). "
+                             "Pianificare affidabilità creditizia."))
+    for pol in bando.polizze_richieste:
+        results.append(_risk(f"R32_{pol}", f"Polizza {pol}", "guarantee",
+                             f"Polizza {pol} richiesta (obbligo contrattuale, non di ammissione). "
+                             "Pianificare: tempi emissione 2-4 settimane."))
+    return results
+
 
 # ─────────────────────────────────────────────────────────
-# Requisiti K — Avvalimento
+# LIVELLO 10 — Avvalimento e subappalto (R33, R34, R35)
 # ─────────────────────────────────────────────────────────
 
-def eval_K_avvalimento(bando: BandoRequisiti) -> Optional[RequirementResult]:
+def eval_R33(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R33 — Avvalimento: ammesso / vietato / limitato"""
     if bando.avvalimento_ammesso == "no":
         return RequirementResult(
-            req_id="K1", name="Avvalimento", category="participation",
+            req_id="R33", name="Avvalimento VIETATO", category="participation",
             status=ReqStatus.KO, severity=Severity.SOFT_RISK,
-            user_message="Il bando ESCLUDE l'avvalimento. Non utilizzabile per colmare gap."
+            user_message="Il bando ESCLUDE l'avvalimento. Non utilizzabile per colmare gap.",
+            confidence=1.0
         )
     if bando.avvalimento_ammesso == "yes":
+        banned_str = f" Vietato per: {', '.join(bando.avvalimento_banned_categories)}." \
+                     if bando.avvalimento_banned_categories else ""
+        migliorativo = " Avvalimento migliorativo ammesso (citabile in offerta tecnica)." \
+                       if bando.avvalimento_migliorativo_ammesso else ""
+        return _ok("R33", "Avvalimento ammesso", "participation",
+                   f"Avvalimento ammesso.{banned_str}{migliorativo} "
+                   f"Regole: {bando.avvalimento_regole or 'verificare'}. "
+                   "Ausiliaria NON può partecipare; contratto deve indicare risorse specifiche.")
+    return None
+
+def eval_R34(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R34 — Subappalto: limiti e dichiarazione DGUE"""
+    pct = bando.subappalto_percentuale_max
+    if pct is None:
+        return None
+    msg = f"Subappalto max {pct:.0f}%. Divieto cascata: {'sì' if bando.subappalto_cascade_ban else 'no'}."
+    if bando.subappalto_dichiarazione_dgue_pena_esclusione:
+        msg += " ⚠️ DICHIARAZIONE SUBAPPALTO NEL DGUE OBBLIGATORIA A PENA DI ESCLUSIONE " \
+               "(anche se non si intende subappaltare)."
         return RequirementResult(
-            req_id="K1", name="Avvalimento ammesso", category="participation",
-            status=ReqStatus.OK, severity=Severity.SOFT_RISK,
-            user_message=(
-                f"Avvalimento ammesso. Regole: {bando.avvalimento_regole or 'verificare bando'}. "
-                "Attenzione: ausiliaria NON può partecipare; contratto deve indicare risorse specifiche."
-            )
+            req_id="R34", name="Subappalto — dichiarazione DGUE pena esclusione",
+            category="participation", status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+            user_message=msg, confidence=1.0
         )
+    return _ok("R34", "Limite subappalto", "participation", msg)
+
+def eval_R35(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R35 — Subappalto qualificante (AI-SOA-03: tre check separati)"""
+    if bando.subappalto_qualificante_ammesso == "no":
+        return None
+    if bando.subappalto_qualificante_ammesso == "yes":
+        msg = "Subappalto qualificante ammesso per copertura categorie scorporabili mancanti."
+        if bando.subappalto_qualificante_dichiarazione_pena_esclusione:
+            msg += " ⚠️ DICHIARAZIONE OBBLIGATORIA A PENA DI ESCLUSIONE — non sanabile con soccorso istruttorio."
+        if bando.soa_prevalent_must_cover_subcontracted:
+            msg += " ⚠️ D04: la classifica della prevalente deve coprire ANCHE l'importo della categoria subappaltata."
+        return _ok("R35", "Subappalto qualificante", "participation", msg)
     return None
 
 
 # ─────────────────────────────────────────────────────────
-# Requisiti L — Subappalto
+# LIVELLO 11 — CCNL e manodopera (R36, R37)
 # ─────────────────────────────────────────────────────────
 
-def eval_L1_subappalto(bando: BandoRequisiti) -> Optional[RequirementResult]:
-    pct = bando.subappalto_percentuale_max
-    if pct is None:
+def eval_R36(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """R36 — CCNL applicabile e dichiarazione equivalenza"""
+    if not bando.ccnl_reference:
         return None
-    return RequirementResult(
-        req_id="L1", name="Limite subappalto", category="participation",
-        status=ReqStatus.OK, severity=Severity.SOFT_RISK,
-        user_message=(
-            f"Subappalto max {pct:.0f}%. "
-            f"Regole: {bando.subappalto_regole or 'verificare capitolato'}. "
-            "Verificare che la prevalente non venga subappaltata in misura prevalente."
+    if company.ccnl_applied and company.ccnl_applied.lower() != bando.ccnl_reference.lower():
+        return _risk("R36", "CCNL — Dichiarazione equivalenza necessaria", "general",
+                     f"SA richiede CCNL '{bando.ccnl_reference}', azienda applica '{company.ccnl_applied}'. "
+                     "Dichiarare equivalenza se ammessa e dimostrabile. In RTI: verifica per ogni componente.")
+    return _ok("R36", "CCNL applicabile", "general",
+               f"CCNL riferimento: {bando.ccnl_reference}.")
+
+def eval_R37(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R37 — Costi manodopera e oneri sicurezza aziendali (a pena esclusione)"""
+    if not bando.labour_costs_must_indicate and not bando.safety_company_costs_must_indicate:
+        return None
+    pena = bando.labour_costs_pena_esclusione or bando.safety_costs_pena_esclusione
+    msg = "Indicare nell'offerta economica: "
+    parts = []
+    if bando.labour_costs_must_indicate:
+        parts.append("costi manodopera")
+    if bando.safety_company_costs_must_indicate:
+        parts.append("oneri sicurezza aziendali (≠ da interferenza)")
+    msg += ", ".join(parts)
+    if pena:
+        msg += " — A PENA DI ESCLUSIONE."
+        return RequirementResult(
+            req_id="R37", name="Costi manodopera/sicurezza — pena esclusione",
+            category="general", status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+            user_message=msg, confidence=1.0
         )
+    return _risk("R37", "Costi manodopera/sicurezza", "general", msg)
+
+
+# ─────────────────────────────────────────────────────────
+# LIVELLO 12 — PNRR (R38, R39, R40)
+# ─────────────────────────────────────────────────────────
+
+def eval_R38_R39(bando: BandoRequisiti) -> List[RequirementResult]:
+    """R38/R39 — PNRR: DNSH e principi trasversali"""
+    results = []
+    if not bando.is_pnrr:
+        return results
+    if bando.pnrr_dnsh_required:
+        results.append(RequirementResult(
+            req_id="R38", name="PNRR — DNSH obbligatorio", category="general",
+            status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+            user_message="DNSH obbligatorio: allegare dichiarazione di impegno + checklist compilata. "
+                         "Mancanza = KO in gara PNRR.",
+            confidence=1.0
+        ))
+    if bando.pnrr_principi_required:
+        principi_str = ", ".join(bando.pnrr_principi_required)
+        results.append(RequirementResult(
+            req_id="R39", name=f"PNRR — Principi trasversali ({principi_str})",
+            category="general", status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+            user_message=f"Principi PNRR richiesti: {principi_str}. "
+                         "Alcune dichiarazioni a pena di esclusione: verificare clausola sociale.",
+            confidence=0.7
+        ))
+    if bando.cam_obbligatori:
+        results.append(_risk("R40", f"CAM obbligatori: {', '.join(bando.cam_obbligatori)}", "general",
+                             "CAM obbligatori in capitolato (requisiti di esecuzione, non di ammissione). "
+                             "Impatto su gestione contratto e collaudo."))
+    return results
+
+
+# ─────────────────────────────────────────────────────────
+# LIVELLO 13 — BIM (R41–R45)
+# ─────────────────────────────────────────────────────────
+
+def eval_R41_R45(bando: BandoRequisiti) -> List[RequirementResult]:
+    """R41–R45 — BIM"""
+    results = []
+    if not bando.is_bim or not bando.bim_capitolato_informativo:
+        return results
+    if bando.bim_ogi_required:
+        status = ReqStatus.HARD_KO if not bando.bim_ogi_valutazione_oepv else ReqStatus.PREMIANTE
+        # OGI: obbligatoria come CONTENUTO, PREMIANTE come punteggio
+        results.append(RequirementResult(
+            req_id="R41", name="BIM — OGI obbligatoria nell'offerta tecnica",
+            category="design", status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+            user_message="OGI (Offerta Gestione Informativa): OBBLIGATORIA come contenuto offerta tecnica "
+                         "(omissione = esclusione), PREMIANTE come punteggio OEPV. "
+                         "ANTI-INF-03: non confondere i due livelli.",
+            confidence=1.0
+        ))
+    if bando.bim_ruoli_minimi:
+        results.append(_risk("R43", f"BIM ruoli: {', '.join(bando.bim_ruoli_minimi)}", "design",
+                             f"Ruoli BIM da dichiarare nell'OGI: {', '.join(bando.bim_ruoli_minimi)}. "
+                             "ACDat/CDE: specificare piattaforma."))
+    if bando.bim_4d_required or bando.bim_5d_required:
+        dims = []
+        if bando.bim_4d_required: dims.append("4D (scheduling)")
+        if bando.bim_5d_required: dims.append("5D (computo/SAL)")
+        results.append(_risk("R45", f"BIM {'+'.join(dims)}", "design",
+                             f"BIM {' e '.join(dims)} richiesto: software specifici necessari "
+                             "(Navisworks, Synchro, RIB iTWO). Impatto economico-operativo significativo."))
+    return results
+
+
+# ─────────────────────────────────────────────────────────
+# LIVELLO 14 — Appalto integrato (R46, R47)
+# ─────────────────────────────────────────────────────────
+
+def eval_R46(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """R46 — Appalto integrato: progettista interno o RTP"""
+    if not bando.appalto_integrato:
+        return None
+    ev = _ev(quote=bando.appalto_integrato_evidence or "", section="Appalto integrato")
+    if company.has_inhouse_design:
+        return _ok("R46", "Progettazione (appalto integrato)", "design",
+                   "Capacità progettuale interna disponibile.", evidence=ev)
+    if company.external_designers_available == "yes" and company.design_team:
+        return _ok("R46", "Progettazione (appalto integrato)", "design",
+                   f"Progettisti esterni: {len(company.design_team)} figure disponibili.", evidence=ev)
+    return _ko("R46", "Progettazione (appalto integrato)", "design",
+               Severity.HARD_KO,
+               "Appalto integrato: progettisti obbligatori (indicazione nominativa in offerta). "
+               "Modalità: (a) dipendente, (b) progettista indicato, (c) RTP costruttore+progettisti.",
+               fixable=True, methods=["progettisti"],
+               constraints=["Iscrizione all'albo obbligatoria", "Firma offerta tecnica richiesta"],
+               gaps=["Gruppo di progettazione"], evidence=ev)
+
+def eval_R47(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """R47 — Giovane professionista in RTP"""
+    if bando.giovane_professionista_richiesto != "yes":
+        return None
+    for d in company.design_team:
+        if d.young_professional == "yes":
+            return _ok("R47", "Giovane professionista", "design",
+                       f"{d.name}: soddisfa requisito giovane professionista.")
+    return _ko("R47", "Giovane professionista mancante", "design",
+               Severity.HARD_KO,
+               "Bando richiede giovane professionista (abilitato da ≤ anni specificati nel disciplinare). "
+               "Verificare soglia anni esatta nel testo.",
+               fixable=True, methods=["progettisti"],
+               gaps=["Giovane professionista abilitato"])
+
+def eval_R48(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R48 — Offerta tecnica: divieti formali"""
+    if not bando.tech_offer_divieto_prezzi_pena_esclusione:
+        return None
+    msg = "Offerta tecnica NON deve contenere prezzi/costi A PENA DI ESCLUSIONE."
+    if bando.tech_offer_max_pagine:
+        msg += f" Max {bando.tech_offer_max_pagine} pagine."
+    return RequirementResult(
+        req_id="R48", name="Offerta tecnica — divieti formali", category="design",
+        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+        user_message=msg, confidence=1.0
     )
 
 
 # ─────────────────────────────────────────────────────────
-# Requisiti M — Vincoli esecutivi
+# LIVELLO 15 — Regole contrattuali (R50–R53)
 # ─────────────────────────────────────────────────────────
 
-def eval_M1_inizio_lavori(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+def eval_R50(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R50 — Inversione procedimentale"""
+    if not bando.inversione_procedimentale:
+        return None
+    return _risk("R50", "Inversione procedimentale (art.107)", "procedural",
+                 "Sequenza invertita: SA apre offerte economiche PRIMA dei requisiti. "
+                 "Verifica ANAC anticipata. Pianificare offerta economica con attenzione.")
+
+def eval_R51_R52(bando: BandoRequisiti) -> List[RequirementResult]:
+    """R51/R52 — Revisione prezzi, quinto d'obbligo, CCT"""
+    results = []
+    if bando.quinto_obbligo:
+        results.append(_risk("R51", "Quinto d'obbligo", "operational",
+                             "SA può variare il contratto ±20%. Impatto su pianificazione economica: "
+                             "includere margine di sicurezza nell'offerta."))
+    if bando.revisione_prezzi_soglia_pct:
+        results.append(_risk("R51b", f"Revisione prezzi (soglia {bando.revisione_prezzi_soglia_pct}%)",
+                             "operational",
+                             f"Revisione prezzi attivata oltre {bando.revisione_prezzi_soglia_pct}% variazione costi. "
+                             "Verificare clausola specifica nel disciplinare."))
+    return results
+
+
+# ─────────────────────────────────────────────────────────
+# LIVELLO 16 — EOI specifici (R58, R59)
+# ─────────────────────────────────────────────────────────
+
+def eval_R58(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R58 — EOI: selezione invitati (AI-INF-07: criteri EOI ≠ requisiti gara)"""
+    if not bando.is_eoi:
+        return None
+    criteria_str = ", ".join(bando.eoi_selection_criteria) if bando.eoi_selection_criteria else "N/D"
+    target = bando.eoi_invited_count_target or "N/D"
+    return _risk("R58", f"EOI — Selezione invitati (target: {target})", "procedural",
+                 f"ANTI-INF-07: criteri selezione EOI ({criteria_str}) NON sono requisiti di ammissione gara. "
+                 "Sono fattori di punteggio EOI. Engine EOI e engine gara sono SEPARATI.")
+
+def eval_R59(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """R59 — Riserva SA: annullamento senza obblighi"""
+    if not bando.sa_reserve_rights:
+        return None
+    return _risk("R59", "Riserva SA: annullamento/sospensione", "procedural",
+                 "La SA si riserva di non procedere con la gara senza obblighi verso i partecipanti. "
+                 "Valutare probabilità di effettivo avanzamento prima di investire risorse.")
+
+
+# ─────────────────────────────────────────────────────────
+# SEZIONE F — D11–D23: Grandi Opere, Qualificazione, PPP
+# ─────────────────────────────────────────────────────────
+
+def eval_D11(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D11 — Pre-gate Sistema di Qualificazione (AI-GR-01)"""
+    if not bando.is_qualification_system:
+        return None
+    owner = bando.qualification_system_owner or "N/D"
+    wflow = bando.qualification_workflow or "N/D"
+    return _risk("D11", f"Sistema di Qualificazione {owner} — Engine qualificazione attivato",
+                 "meta",
+                 f"DOCUMENTO = Sistema di Qualificazione ({owner}). "
+                 f"Workflow: {wflow}. "
+                 "AI-GR-01: NON applicare engine gara. Attivare SOLO D12–D20. "
+                 "Output: ELIGIBLE/NOT_ELIGIBLE per qualificazione, non GO/NO_GO gara.")
+
+def eval_D12(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D12 — Qualificazione: requisiti alla data domanda"""
+    if not bando.is_qualification_system:
+        return None
+    return RequirementResult(
+        req_id="D12", name="Requisiti alla data domanda (qualificazione)", category="qualification",
+        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+        user_message="In sistema di qualificazione: tutti i requisiti devono essere POSSEDUTI alla data "
+                     "della domanda. Integrazione documenti ammessa solo per DIMOSTRARE requisiti già esistenti. "
+                     "Mancanza requisito alla data → KO non sanabile (rigetto domanda).",
+        confidence=1.0
+    )
+
+def eval_D13(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D13 — Qualificazione: decadenza per mancata integrazione nei termini"""
+    if not bando.is_qualification_system:
+        return None
+    gg = bando.qualification_missing_docs_deadline_days
+    effetto = bando.qualification_failure_effect or "decadenza_domanda"
+    return _risk("D13", "Qualificazione — monitoraggio integrazioni documenti", "qualification",
+                 f"Se SA richiede integrazione documenti: rispondere entro {gg or 'N/D'} giorni. "
+                 f"Mancata risposta → {effetto}. "
+                 "Monitorare attivamente le comunicazioni della SA.")
+
+def eval_D14(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D14 — Mantenimento qualificazione: variazioni 30/60 giorni"""
+    if not bando.is_qualification_system or not bando.maintenance_variation_types:
+        return None
+    var_list = []
+    for v in bando.maintenance_variation_types:
+        var_list.append(f"{v.get('type', '?')}: entro {v.get('notify_within_days', '?')} gg")
+    return _risk("D14", "Mantenimento qualificazione — comunicazione variazioni", "qualification",
+                 "Obbligo comunicazione variazioni (compliance continua): " +
+                 "; ".join(var_list) + ". "
+                 "Ritardo → sospensione/dequalifica (non KO gara singola, KO del sistema).")
+
+def eval_D15(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D15 — Rinnovo triennale qualificazione"""
+    if not bando.is_qualification_system:
+        return None
+    exp = bando.qualification_expiry_date
+    if exp:
+        d = _parse_date(exp)
+        if d:
+            months_left = (d - _today()).days / 30
+            if months_left < bando.maintenance_submit_months_before:
+                return _ko("D15", "Rinnovo qualificazione — URGENTE", "qualification",
+                           Severity.HARD_KO,
+                           f"Qualificazione scade {exp} (tra ~{months_left:.0f} mesi). "
+                           f"Inviare rinnovo almeno {bando.maintenance_submit_months_before} mesi prima. "
+                           "Invio tempestivo mantiene validità 'nelle more'.",
+                           gaps=["Domanda rinnovo qualificazione"])
+    return _risk("D15", f"Rinnovo qualificazione triennale", "qualification",
+                 f"Ciclo rinnovo: {bando.maintenance_renewal_cycle_years} anni. "
+                 f"Inviare almeno {bando.maintenance_submit_months_before} mesi prima della scadenza. "
+                 "Invio nei termini: validità prorogata in attesa di valutazione.")
+
+def eval_D16(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """D16 — PSF/PSFM: score economico-finanziario (AI-GR-02: mai stimare soglie)"""
+    if not bando.is_qualification_system:
+        return None
+    threshold = bando.psf_min_threshold
+    if threshold is None or threshold == "in_normativa_sottosistema":
+        return _unknown("D16", "PSF/PSFM — score economico-finanziario", "financial",
+                        "Soglie PSF/PSFM rinviate a 'Normativa di sottosistema' (documento separato). "
+                        "AI-GR-02: NON stimare soglie. Consultare normativa committente.",
+                        sev=Severity.HARD_KO)
+    psf_company = company.psf_score
+    if psf_company is None:
+        return _unknown("D16", "PSF/PSFM", "financial",
+                        f"Soglia PSF: {threshold}. Calcolare PSF aziendale e confrontare.")
+    if psf_company >= float(threshold):
+        return _ok("D16", "PSF — score sufficiente", "financial",
+                   f"PSF aziendale {psf_company:.2f} ≥ soglia {threshold} ✓")
+    return _ko("D16", "PSF sotto soglia", "financial", Severity.HARD_KO,
+               f"PSF {psf_company:.2f} < soglia {threshold}. "
+               f"Calcolare PSFM. Effetto: {bando.psf_below_threshold_effect or 'provvedimenti'}. "
+               + ("Eccezione concordato continuità applicabile." if bando.psf_exception_concordato else ""),
+               gaps=["PSF/PSFM sufficiente"])
+
+def eval_D17(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """D17 — Bilanci depositati minimi (AI-GR-06: ausiliaria ≥2)"""
+    if not bando.is_qualification_system:
+        return None
+    min_req = bando.financial_min_bilanci_applicant
+    count = company.deposited_statements_count
+    if count < min_req:
+        avv_allowed = bando.avvalimento_ammesso == "yes"
+        return _ko("D17", f"Bilanci depositati insufficienti ({count} < {min_req})", "financial",
+                   Severity.HARD_KO,
+                   f"Richiedente: {count} bilanci depositati, richiesti ≥{min_req}. "
+                   + (f"Avvalimento ammesso ma ausiliaria deve avere ≥{bando.financial_min_bilanci_auxiliary} bilanci."
+                      if avv_allowed else "Avvalimento non ammesso per questo requisito."),
+                   fixable=avv_allowed, methods=["avvalimento"] if avv_allowed else [],
+                   gaps=[f"Bilanci depositati (min {min_req})"])
+    return _ok("D17", f"Bilanci depositati {count} ≥ {min_req}", "financial",
+               "Bilanci depositati sufficienti ✓")
+
+def eval_D18(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """D18 — Avvalimento in qualificazione: non frazionabilità (AI-GR-03)"""
+    if not bando.is_qualification_system or not bando.avvalimento_non_frazionabili:
+        return None
+    non_fraz = bando.avvalimento_non_frazionabili
+    nf_str = ", ".join(non_fraz)
+    return _risk("D18", f"Avvalimento — requisiti non frazionabili: {nf_str}", "qualification",
+                 f"Requisiti non frazionabili ({nf_str}): soluzione BINARIA — o possiedi il 100% o KO. "
+                 "AI-GR-03: NON tentare combinazioni parziali. "
+                 f"Divieto cascata: {bando.avvalimento_no_cascade}. "
+                 "ISO9001 NON automaticamente frazionabile in sistemi di qualificazione.")
+
+def eval_D19(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """D19 — Classi d'interpello e logica fatturato residuo consorzi"""
+    if not bando.is_qualification_system:
+        return None
+    if bando.rete_soggettivita_giuridica_required:
+        return _risk("D19", "Rete — soggettività giuridica richiesta", "qualification",
+                     "Rete SENZA soggettività giuridica: NON qualificabile come soggetto unico. "
+                     "AI-GR-05: non proporre 'rete come RTI'. "
+                     "Alternativa: tutte le retiste si qualificano singolarmente.")
+    if bando.interpello_class_type:
+        return _risk("D19", f"Classe interpello: {bando.interpello_class_type}", "qualification",
+                     f"Classe '{bando.interpello_class_type}': {bando.interpello_cap_rule or 'verificare cap'}. "
+                     "Classe 'illimitata' NON = infinito: limitata da fatturato specifico. "
+                     "Consorzi: logica fatturato residuo (specifica grandi committenti).")
+    return None
+
+def eval_D20(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D20 — Fee qualificazione e visita tecnica"""
+    if not bando.is_qualification_system or not bando.qualification_fee_required:
+        return None
+    fee_str = "; ".join(
+        f"{f.get('system', '?')}: {f.get('amount', '?')}€"
+        for f in bando.qualification_fee_amounts
+    ) if bando.qualification_fee_amounts else "verificare tabella"
+    return RequirementResult(
+        req_id="D20", name="Fee qualificazione obbligatorio", category="procedural",
+        status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+        user_message=f"Rimborso spese richiesto per qualificazione: {fee_str}. "
+                     "Mancato pagamento → KO procedura. "
+                     + ("Visita tecnica possibile: pagare fee prima." if bando.qualification_site_visit_possible else ""),
+        confidence=1.0
+    )
+
+def eval_D21(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D21 — PPP / Dialogo competitivo: procedura a fasi (AI-GR-04)"""
+    if not bando.procedure_multi_stage:
+        return None
+    stages_str = ", ".join(s.get("name", "?") for s in bando.procedure_stages) \
+                 if bando.procedure_stages else "N/D"
+    return _risk("D21", f"PPP multi-stage: {stages_str}", "meta",
+                 f"Procedura multi-stage ({stages_str}). "
+                 "AI-GR-04: mai GO/NO_GO unico. Output per FASE: Stage 1 (ammissione) / "
+                 "Stage 2 (dialogo: risorse significative) / Stage 3 (offerta finale + capacità finanziaria PPP). "
+                 "Ammissione Stage 1 ≠ capacità Stage 3 (quota privata, governance SPV).")
+
+def eval_D22(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """D22 — PPP/PNRR: quota cofinanziamento privato + SPV"""
+    if not bando.ppp_private_share_percent and not bando.ppp_private_contribution_amount:
+        return None
+    contrib = bando.ppp_private_contribution_amount
+    pct = bando.ppp_private_share_percent
+    msg = f"Quota privata richiesta: {pct or '?'}% ({contrib:,.0f}€ ca.)." \
+          if contrib else f"Quota privata: {pct or '?'}%."
+    spv_msg = ""
+    if bando.ppp_spv_required:
+        spv_msg = f" SPV/società mista richiesta. Governance: {bando.ppp_governance_constraints or 'verificare'}."
+    # Non abbiamo dati finanziari sufficienti senza profilo PPP → UNKNOWN
+    return _unknown("D22", "PPP — quota privata e SPV", "financial",
+                    msg + spv_msg + " Valutare: (1) capacità finanziaria quota privata, "
+                    "(2) willingness governance mista, (3) durata concessione.",
+                    sev=Severity.HARD_KO)
+
+def eval_D23(bando: BandoRequisiti) -> Optional[RequirementResult]:
+    """D23 — Infrastrutture critiche: security compliance"""
+    if not bando.security_special_regime:
+        return None
+    impact = bando.security_admission_impact
+    if impact == "esclusione":
+        return RequirementResult(
+            req_id="D23", name="Security — regime speciale (pena esclusione)", category="general",
+            status=ReqStatus.UNKNOWN, severity=Severity.HARD_KO,
+            user_message=f"Security speciale A PENA DI ESCLUSIONE. Riferimento: {bando.security_reference_text or 'N/D'}. "
+                         "Verificare clearance e protocolli richiesti.",
+            confidence=1.0
+        )
+    return _risk("D23", "Security — regime speciale infrastrutture critiche", "general",
+                 f"Regime di sicurezza speciale ({bando.security_reference_text or 'N/D'}): "
+                 "condizione di esecuzione, non di ammissione. "
+                 "Pianificare vetting personale, protocolli specifici, certificazioni security.")
+
+
+# ─────────────────────────────────────────────────────────
+# Certificazioni (D1–D4)
+# ─────────────────────────────────────────────────────────
+
+def eval_D_certificazioni(bando: BandoRequisiti, company: CompanyProfile) -> List[RequirementResult]:
+    """Certificazioni ISO e altre (R28 + generali)"""
+    results = []
+    for i, cert_req in enumerate(bando.certificazioni_richieste):
+        req_id = f"D{i+1}"
+        found = next((c for c in company.certifications
+                      if cert_req.lower().replace(" ", "") in c.cert_type.lower().replace(" ", "")), None)
+        if not found:
+            results.append(_ko(req_id, f"Certificazione {cert_req}", "certification",
+                               Severity.HARD_KO,
+                               f"{cert_req} NON posseduta.",
+                               gaps=[cert_req]))
+        else:
+            exp = _parse_date(found.expiry_date) if found.expiry_date else None
+            if exp and exp < _today():
+                results.append(_ko(req_id, f"Certificazione {cert_req}", "certification",
+                                   Severity.HARD_KO,
+                                   f"{cert_req} SCADUTA il {found.expiry_date}.",
+                                   gaps=[f"Rinnovo {cert_req}"]))
+            else:
+                results.append(_ok(req_id, f"Certificazione {cert_req}", "certification",
+                                   f"{cert_req} valida (scad. {found.expiry_date or 'N/D'}) ✓"))
+    return results
+
+
+# ─────────────────────────────────────────────────────────
+# Vincoli esecutivi (M1, R51)
+# ─────────────────────────────────────────────────────────
+
+def eval_M1(bando: BandoRequisiti, company: CompanyProfile) -> Optional[RequirementResult]:
+    """M1 — Inizio lavori tassativo"""
     if not bando.start_lavori_tassativo:
         return None
     d = _parse_date(bando.start_lavori_tassativo)
     giorni = (d - _today()).days if d else None
-    msg = f"Inizio lavori tassativo entro {bando.start_lavori_tassativo}"
+    msg = f"Inizio lavori tassativo: {bando.start_lavori_tassativo}"
     if giorni is not None:
         msg += f" (tra {giorni} giorni)"
     if company.start_date_constraints:
@@ -787,86 +1388,191 @@ def eval_M1_inizio_lavori(bando: BandoRequisiti, company: CompanyProfile) -> Opt
     return RequirementResult(
         req_id="M1", name="Inizio lavori tassativo", category="operational",
         status=ReqStatus.UNKNOWN, severity=Severity.SOFT_RISK,
-        user_message=msg + ". Valutare disponibilità risorse e cantiere."
+        user_message=msg + ". Valutare disponibilità risorse.", confidence=1.0
     )
 
 def eval_M_vincoli(bando: BandoRequisiti) -> List[RequirementResult]:
+    """M2+ — Vincoli esecutivi generici"""
     results = []
     for i, v in enumerate(bando.vincoli_esecutivi):
+        lv = v.lower()
+        sev = Severity.SOFT_RISK
         results.append(RequirementResult(
             req_id=f"M{i+2}", name="Vincolo esecutivo", category="operational",
-            status=ReqStatus.UNKNOWN, severity=Severity.SOFT_RISK,
-            user_message=v
+            status=ReqStatus.UNKNOWN, severity=sev, user_message=v, confidence=0.7
         ))
     return results
 
 
 # ══════════════════════════════════════════════════════════
-# ENTRY POINT
+# ENTRY POINT PRINCIPALE
 # ══════════════════════════════════════════════════════════
 
 def evaluate_all(bando: BandoRequisiti, company: CompanyProfile,
                  participation_forms: Any = None) -> List[RequirementResult]:
+    """
+    Valutazione completa — Libreria v2.1 (84 requisiti):
+    - Engine QUALIFICAZIONE se is_qualification_system=True (D11–D20)
+    - Engine GARA ORDINARIA se False (R00a–R60 + D01–D10)
+    - Engine PPP se procedure_multi_stage=True (D21–D23)
+    """
     results: List[RequirementResult] = []
 
-    # A — Generali
-    results.extend([eval_A1(bando, company), eval_A2(bando, company), eval_A5(bando, company)])
+    # L0 — Classificazione (sempre)
+    results.append(eval_R00a(bando))
+    results.append(eval_R00b(bando))
 
-    # B — Idoneità
-    results.append(eval_B1(bando, company))
-    results.append(eval_B4(bando, company))
+    # D11 — Pre-gate qualificazione
+    d11 = eval_D11(bando)
+    if d11:
+        results.append(d11)
 
-    # C — SOA (con fix classifica per importo categoria)
-    results.append(eval_C1_prevalente(bando, company, participation_forms))
-    results.extend(eval_C2_scorporabili(bando, company))
-    results.extend(eval_C5_validita(bando, company))
+    # ─── ENGINE QUALIFICAZIONE (D11–D20) ──────────────────
+    if bando.is_qualification_system:
+        for fn in [eval_D12, eval_D13, eval_D14, eval_D15]:
+            r = fn(bando)
+            if r: results.append(r)
+        r16 = eval_D16(bando, company)
+        if r16: results.append(r16)
+        r17 = eval_D17(bando, company)
+        if r17: results.append(r17)
+        r18 = eval_D18(bando, company)
+        if r18: results.append(r18)
+        r19 = eval_D19(bando, company)
+        if r19: results.append(r19)
+        r20 = eval_D20(bando)
+        if r20: results.append(r20)
+        return [r for r in results if r is not None]
 
-    # D — Certificazioni (matching strict)
+    # ─── ENGINE GARA ORDINARIA ────────────────────────────
+
+    # L1 — Gate digitali
+    for fn in [eval_R01, eval_R05]:
+        r = fn(bando)
+        if r: results.append(r)
+    results.append(eval_R02(bando))
+    results.append(eval_R03(bando))
+    results.append(eval_R04(bando, company))
+
+    # L2 — Sopralluogo
+    r = eval_R06(bando)
+    if r: results.append(r)
+
+    # L3 — ANAC/FVOE
+    for fn in [eval_R07, eval_R08]:
+        r = fn(bando)
+        if r: results.append(r)
+    results.append(eval_R09(bando))
+
+    # L4 — Partecipazione
+    results.append(eval_R10(bando, company))
+    r = eval_R11(bando)
+    if r: results.append(r)
+    results.append(eval_R12(bando))
+
+    # L5 — Requisiti generali
+    r = eval_R13(bando)
+    if r: results.append(r)
+    results.extend([eval_R14(bando), eval_R15(bando)])
+    r = eval_R16(bando)
+    if r: results.append(r)
+    r = eval_R17(bando)
+    if r: results.append(r)
+
+    # L6 — Idoneità professionale
+    results.append(eval_R18(bando, company))
+    r = eval_R19(bando, company)
+    if r: results.append(r)
+
+    # L7 — Economico-finanziari
+    for fn in [eval_R20, eval_R21]:
+        r = fn(bando, company)
+        if r: results.append(r)
+
+    # L8 — SOA (solo lavori ≥ 150k, ANTI-INF-09)
+    imp = bando.importo_lavori or bando.importo_base_gara
+    r_r24 = eval_R24(bando)
+    if r_r24: results.append(r_r24)
+    if not imp or imp >= 150_000:
+        results.append(eval_R25(bando, company))
+        results.extend(eval_R26_scorporabili(bando, company))
+    r = eval_R27(bando)
+    if r: results.append(r)
+    r = eval_R27_alt_culturale(bando)
+    if r: results.append(r)
+    r = eval_R29_accordo_quadro(bando)
+    if r: results.append(r)
+    results.extend(eval_R28_soa_validita(bando, company))
+
+    # D01–D10: SOA differenzianti
+    r = eval_D02(bando)
+    if r: results.append(r)
+    r = eval_D05(bando, company)
+    if r: results.append(r)
+    r = eval_D06(bando)
+    if r: results.append(r)
+    r = eval_D09(bando)
+    if r: results.append(r)
+    r = eval_D10(bando, company)
+    if r: results.append(r)
+
+    # Certificazioni
     results.extend(eval_D_certificazioni(bando, company))
 
-    # E — Economico-finanziari
-    for e in [eval_E1_fatturato(bando, company), eval_E2_fatturato_specifico(bando, company)]:
-        if e:
-            results.append(e)
+    # L9 — Garanzie
+    r = eval_R30(bando, company)
+    if r: results.append(r)
+    results.extend(eval_R31_R32(bando))
 
-    # G — Progettazione
-    for g in [eval_G1_appalto_integrato(bando, company), eval_G4_giovane_professionista(bando, company)]:
-        if g:
-            results.append(g)
+    # L10 — Avvalimento/subappalto
+    for fn in [eval_R33, eval_R34, eval_R35]:
+        r = fn(bando)
+        if r: results.append(r)
 
-    # H — Gate procedurali
-    for h in [eval_H1_sopralluogo(bando, company), eval_H4_anac(bando, company)]:
-        if h:
-            results.append(h)
-    results.append(eval_H5_piattaforma(bando, company))
+    # L11 — CCNL
+    r = eval_R36(bando, company)
+    if r: results.append(r)
+    r = eval_R37(bando)
+    if r: results.append(r)
 
-    # H — NEW: Manodopera e Divieto Subappalto
-    mano = eval_H_manodopera(bando)
-    if mano:
-        results.append(mano)
-    div_sub = eval_H_divieto_subappalto(bando)
-    if div_sub:
-        results.append(div_sub)
+    # L12 — PNRR (condizionale)
+    if bando.is_pnrr:
+        results.extend(eval_R38_R39(bando))
 
-    # I — Garanzie
-    i1 = eval_I1_provvisoria(bando, company)
-    if i1:
-        results.append(i1)
+    # L13 — BIM (condizionale)
+    if bando.is_bim:
+        results.extend(eval_R41_R45(bando))
 
-    # K — Avvalimento
-    k1 = eval_K_avvalimento(bando)
-    if k1:
-        results.append(k1)
+    # L14 — Appalto integrato (condizionale)
+    if bando.appalto_integrato:
+        for fn_ai in [eval_R46, eval_R47]:
+            r = fn_ai(bando, company)
+            if r: results.append(r)
+        r = eval_R48(bando)
+        if r: results.append(r)
 
-    # L — Subappalto
-    l1 = eval_L1_subappalto(bando)
-    if l1:
-        results.append(l1)
+    # L15 — Regole contrattuali
+    r = eval_R50(bando)
+    if r: results.append(r)
+    results.extend(eval_R51_R52(bando))
 
-    # M — Operativi
-    m1 = eval_M1_inizio_lavori(bando, company)
-    if m1:
-        results.append(m1)
+    # L16 — EOI specifici
+    r = eval_R58(bando)
+    if r: results.append(r)
+    r = eval_R59(bando)
+    if r: results.append(r)
+
+    # D21–D23 — PPP/Grandi Opere
+    r = eval_D21(bando)
+    if r: results.append(r)
+    r = eval_D22(bando, company)
+    if r: results.append(r)
+    r = eval_D23(bando)
+    if r: results.append(r)
+
+    # Vincoli esecutivi
+    r = eval_M1(bando, company)
+    if r: results.append(r)
     results.extend(eval_M_vincoli(bando))
 
     return [r for r in results if r is not None]

@@ -1,23 +1,25 @@
 """
-BidPilot v3.0 — Analyzer
-Orchestratore: PDF → BandoRequisiti → CompanyProfile → DecisionReport
+BidPilot v4.0 — Analyzer
+Orchestratore: PDF → BandoRequisiti v4.0 → DecisionReport
+Motori: gara ordinaria / qualificazione (D11) / PPP multi-stage (D21)
 """
 from __future__ import annotations
 import json
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 
-from src.schemas import BandoRequisiti, CompanyProfile, SOAAttestation, Certification
-from src.schemas import TurnoverEntry, SectorTurnoverEntry, SimilarWork, Designer, StaffRole
-from src.schemas import LegalRepresentative, CameralRegistration, DecisionReport
+from src.schemas import (
+    BandoRequisiti, CompanyProfile, SOAAttestation, Certification,
+    TurnoverEntry, SectorTurnoverEntry, SimilarWork, Designer, StaffRole,
+    LegalRepresentative, CameralRegistration, DecisionReport
+)
 from src.prompts import EXTRACTION_SYSTEM_PROMPT, EXTRACTION_USER_PROMPT
 from src.decision_engine import produce_decision_report
 
-
-# Mapping comuni → regioni per validazione geografica
+# Validazione geografica anti-allucinazione
 GEO_VALIDATION = {
     "roma": "lazio", "milano": "lombardia", "torino": "piemonte",
     "napoli": "campania", "palermo": "sicilia", "genova": "liguria",
@@ -31,22 +33,21 @@ GEO_VALIDATION = {
 
 class BandoAnalyzer:
     """
-    Analizzatore bandi v3.0 con decision engine a 4 stati.
-    
+    Analizzatore bandi v4.0 — Libreria Requisiti v2.1 (84 requisiti).
+
     Flusso:
-      1. Estrazione strutturata dal testo (LLM → BandoRequisiti)
+      1. Estrazione strutturata dal testo (LLM → BandoRequisiti v4.0)
       2. Validazione anti-allucinazione geografica
       3. Build CompanyProfile dal JSON di configurazione
-      4. Decision engine deterministico → DecisionReport
+      4. Decision engine → DecisionReport
+         - Engine qualificazione se is_qualification_system
+         - Engine PPP se procedure_multi_stage
+         - Engine gara altrimenti
     """
 
     def __init__(self, openai_api_key: str,
                  profilo_path: str = "config/profilo_azienda.json"):
-        self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0,
-            api_key=openai_api_key
-        )
+        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=openai_api_key)
         with open(profilo_path, "r", encoding="utf-8") as f:
             self._raw_profile = json.load(f)
 
@@ -55,7 +56,6 @@ class BandoAnalyzer:
     # ──────────────────────────────────────────────────────
 
     def extract_requirements(self, bando_text: str) -> BandoRequisiti:
-        """Estrae struttura BandoRequisiti usando GPT-4o-mini con structured output."""
         MAX_LENGTH = 300_000
         if len(bando_text) > MAX_LENGTH:
             half = MAX_LENGTH // 2
@@ -64,14 +64,12 @@ class BandoAnalyzer:
                 + "\n\n[...DOCUMENTO TRONCATO — SEZIONE CENTRALE OMESSA...]\n\n"
                 + bando_text[-half:]
             )
-
         prompt = ChatPromptTemplate.from_messages([
             ("system", EXTRACTION_SYSTEM_PROMPT),
             ("user", EXTRACTION_USER_PROMPT),
         ])
         structured_llm = self.llm.with_structured_output(BandoRequisiti)
         chain = prompt | structured_llm
-
         try:
             requisiti: BandoRequisiti = chain.invoke({"bando_text": bando_text})
             self._validate_geo(requisiti)
@@ -80,7 +78,6 @@ class BandoAnalyzer:
             raise RuntimeError(f"Errore estrazione bando: {e}") from e
 
     def _validate_geo(self, req: BandoRequisiti) -> None:
-        """Blocca incoerenze geografiche (anti-allucinazione)."""
         if req.comune_stazione_appaltante and req.regione_stazione_appaltante:
             comune = req.comune_stazione_appaltante.lower().strip()
             regione = req.regione_stazione_appaltante.lower().strip()
@@ -96,50 +93,42 @@ class BandoAnalyzer:
     # ──────────────────────────────────────────────────────
 
     def _build_company_profile(self) -> CompanyProfile:
-        """Converte il JSON di configurazione in CompanyProfile strutturato."""
         raw = self._raw_profile
 
-        # SOA
-        soa_list = []
-        for s in raw.get("soa_possedute", []):
-            soa_list.append(SOAAttestation(
+        soa_list = [
+            SOAAttestation(
                 category=s.get("categoria", ""),
                 soa_class=s.get("classifica", ""),
                 expiry_date=s.get("scadenza", ""),
                 issue_date=s.get("data_emissione", ""),
                 notes=s.get("note", "")
-            ))
+            )
+            for s in raw.get("soa_possedute", [])
+        ]
 
-        # Certificazioni
-        cert_list = []
-        for c in raw.get("certificazioni", []):
-            tipo = c.get("tipo", "")
-            if tipo.upper() in ("SOA",):  # non è una cert ISO
-                continue
-            cert_list.append(Certification(
-                cert_type=tipo,
+        cert_list = [
+            Certification(
+                cert_type=c.get("tipo", ""),
                 valid=True,
                 scope=c.get("descrizione", ""),
                 expiry_date=c.get("scadenza", "")
-            ))
+            )
+            for c in raw.get("certificazioni", [])
+            if c.get("tipo", "").upper() not in ("SOA",)
+        ]
 
-        # Fatturati
-        turnover = []
-        sector_turnover = []
         fat = raw.get("fatturato", {})
+        turnover, sector_turnover = [], []
         for year_key, data in fat.items():
             try:
                 y = int(year_key.replace("anno_", ""))
             except Exception:
                 continue
-            totale = data.get("totale", 0)
-            turnover.append(TurnoverEntry(year=y, amount_eur=totale))
-            settore_principale = raw.get("settore_principale", "")
+            turnover.append(TurnoverEntry(year=y, amount_eur=data.get("totale", 0)))
             for k, v in data.items():
                 if k != "totale" and isinstance(v, (int, float)):
                     sector_turnover.append(SectorTurnoverEntry(year=y, sector=k, amount_eur=v))
 
-        # Rappresentante legale
         lr = raw.get("legale_rappresentante", {})
         legal_rep = LegalRepresentative(
             name=lr.get("nome", raw.get("nome_azienda", "")),
@@ -148,7 +137,6 @@ class BandoAnalyzer:
             signing_powers_proof=lr.get("poteri_firma", "available")
         )
 
-        # CCIAA
         cciaa_data = raw.get("cciaa", {})
         cameral = CameralRegistration(
             is_registered=cciaa_data.get("iscritta", True),
@@ -158,21 +146,19 @@ class BandoAnalyzer:
             coherence_with_tender_object="unknown"
         )
 
-        # Figure chiave
-        key_roles = []
-        for f in raw.get("figure_professionali_interne", []):
-            key_roles.append(StaffRole(role=f, available=True))
+        key_roles = [StaffRole(role=f, available=True)
+                     for f in raw.get("figure_professionali_interne", [])]
 
-        # Progettisti
-        design_team = []
-        for d in raw.get("progettisti", []):
-            design_team.append(Designer(
+        design_team = [
+            Designer(
                 name=d.get("nome", ""),
                 profession=d.get("professione", ""),
                 order_registration=d.get("albo", "unknown"),
                 license_date=d.get("data_abilitazione", ""),
                 young_professional=d.get("giovane_professionista", "unknown")
-            ))
+            )
+            for d in raw.get("progettisti", [])
+        ]
 
         return CompanyProfile(
             legal_name=raw.get("nome_azienda", ""),
@@ -192,8 +178,9 @@ class BandoAnalyzer:
             willing_subcontract=raw.get("partecipazione", {}).get("subappalto", True),
             operating_regions=raw.get("aree_geografiche", []),
             start_date_constraints=raw.get("vincoli_inizio_lavori", ""),
-            bank_references_available="unknown",
-            cel_records_available="unknown",
+            ccnl_applied=raw.get("ccnl_applicato", ""),
+            has_credit_license=raw.get("patente_crediti", "unknown"),
+            deposited_statements_count=raw.get("bilanci_depositati", 0),
         )
 
     # ──────────────────────────────────────────────────────
@@ -201,28 +188,10 @@ class BandoAnalyzer:
     # ──────────────────────────────────────────────────────
 
     def analyze_bando(self, bando_text: str) -> Dict[str, Any]:
-        """
-        Pipeline completa:
-          bando_text → BandoRequisiti → DecisionReport (v3.0)
-
-        Restituisce dict con:
-          - decision_report: DecisionReport
-          - requisiti_estratti: dict (raw BandoRequisiti)
-          - company_profile: dict (CompanyProfile)
-          - legacy: dict compatibilità UI v2
-        """
-        # Estrazione
         bando = self.extract_requirements(bando_text)
-
-        # Profilo aziendale
         company = self._build_company_profile()
-
-        # Decision engine
         report: DecisionReport = produce_decision_report(bando, company)
-
-        # Compatibilità legacy per UI
         legacy = self._build_legacy(bando, company, report)
-
         return {
             "decision_report": report,
             "requisiti_estratti": bando.model_dump(),
@@ -233,25 +202,23 @@ class BandoAnalyzer:
     def _build_legacy(self, bando: BandoRequisiti,
                       company: CompanyProfile,
                       report: DecisionReport) -> Dict[str, Any]:
-        """Costruisce struttura legacy per retrocompatibilità con la UI v2."""
         # Check geografico
         in_zona = False
         if bando.regione_stazione_appaltante:
-            regione_norm = bando.regione_stazione_appaltante.strip().title()
-            in_zona = any(regione_norm in area for area in company.operating_regions)
-        
+            reg = bando.regione_stazione_appaltante.strip().title()
+            in_zona = any(reg in area for area in company.operating_regions)
         geo = {
             "in_zona": in_zona,
             "motivo": (
                 f"Bando in {bando.regione_stazione_appaltante or '?'}"
-                + (", area operativa ✓" if in_zona else " — FUORI aree abituali")
+                + (" — area operativa ✓" if in_zona else " — FUORI aree abituali")
             ),
             "warning": not in_zona and bool(bando.regione_stazione_appaltante)
         }
 
         # Scadenze legacy
         from src.requirements_engine import _parse_date, _today
-        scad_dict = {"critiche": [], "prossime": [], "ok": [], "scadute": []}
+        scad_dict: Dict[str, list] = {"critiche": [], "prossime": [], "ok": [], "scadute": []}
         for sc in bando.scadenze:
             if not sc.data:
                 continue
@@ -259,10 +226,8 @@ class BandoAnalyzer:
             if d is None:
                 continue
             giorni = (d - _today()).days
-            info = {
-                "tipo": sc.tipo, "data": sc.data, "ora": sc.ora,
-                "note": sc.note, "giorni_mancanti": giorni
-            }
+            info = {"tipo": sc.tipo, "data": sc.data, "ora": sc.ora,
+                    "note": sc.note, "giorni_mancanti": giorni}
             if giorni < 0:
                 scad_dict["scadute"].append(info)
             elif giorni <= 2:
@@ -272,55 +237,39 @@ class BandoAnalyzer:
             else:
                 scad_dict["ok"].append(info)
 
-        # SOA legacy (da requirements_results)
         from src.schemas import ReqStatus, Severity
-        soa_v = {"verdi": [], "gialli": [], "rossi": []}
-        cert_v = {"verdi": [], "gialli": [], "rossi": []}
-        fig_v = {"verdi": [], "gialli": [], "rossi": []}
+        ko_count = sum(1 for r in report.requirements_results
+                       if r.status == ReqStatus.KO and r.severity == Severity.HARD_KO)
+        ok_count = sum(1 for r in report.requirements_results if r.status == ReqStatus.OK)
+        total = len(report.requirements_results) or 1
+        score_sec = max(0, min(100, int(100 * ok_count / total) - ko_count * 20))
 
-        for r in report.requirements_results:
-            if r.req_id.startswith("C") and "SOA" in r.name:
-                item = {"categoria": r.name, "motivo": r.user_message, **r.fixability.model_dump()}
-                if r.status == ReqStatus.OK:
-                    soa_v["verdi"].append(item)
-                elif r.status in (ReqStatus.KO, ReqStatus.FIXABLE):
-                    soa_v["rossi"].append(item)
-            elif r.req_id.startswith("D"):
-                item = {"tipo": r.name, "motivo": r.user_message}
-                if r.status == ReqStatus.OK:
-                    cert_v["verdi"].append(item)
-                elif r.status == ReqStatus.KO:
-                    cert_v["rossi"].append(item)
-                else:
-                    cert_v["gialli"].append(item)
-
-        # Mappa verdetto → legacy
         verdict_map = {
             "GO": "PARTECIPARE",
             "GO_HIGH_RISK": "PARTECIPARE CON CAUTELA",
             "GO_WITH_STRUCTURE": "PARTECIPARE CON STRUTTURA",
-            "NO_GO": "NON PARTECIPARE"
+            "NO_GO": "NON PARTECIPARE",
+            "ELIGIBLE_QUALIFICATION": "ELIGIBLE — QUALIFICAZIONE",
+            "NOT_ELIGIBLE_QUALIFICATION": "NON ELIGIBLE — QUALIFICAZIONE",
+            "ELIGIBLE_STAGE1": "ELIGIBLE STAGE 1 — PPP",
         }
         legacy_dec = verdict_map.get(report.verdict.status.value, "PARTECIPARE CON CAUTELA")
 
-        # Score secondario (per barra progresso)
-        ko_count = sum(1 for r in report.requirements_results
-                       if r.status == ReqStatus.KO and r.severity == Severity.HARD_KO)
-        fix_count = sum(1 for r in report.requirements_results
-                        if r.status == ReqStatus.FIXABLE)
-        ok_count = sum(1 for r in report.requirements_results
-                       if r.status == ReqStatus.OK)
-        total = len(report.requirements_results) or 1
-        score_sec = max(0, min(100, int(100 * ok_count / total) - ko_count * 20))
+        # Nota engine mode
+        engine_note = ""
+        if report.engine_mode == "qualificazione":
+            engine_note = f"⚙️ Engine QUALIFICAZIONE attivato ({bando.qualification_system_owner or 'N/D'})"
+        elif report.engine_mode == "ppp_multistage":
+            engine_note = "⚙️ Engine PPP MULTI-STAGE attivato"
 
         return {
             "requisiti_estratti": bando.model_dump(),
             "check_geografico": geo,
             "scadenze": scad_dict,
-            "soa": soa_v,
-            "certificazioni": cert_v,
-            "figure_professionali": fig_v,
             "decisione": legacy_dec,
             "punteggio_fattibilita": score_sec,
             "motivi_punteggio": [r.message for r in report.top_reasons],
+            "engine_mode": report.engine_mode,
+            "engine_note": engine_note,
+            "profile_confidence": report.verdict.profile_confidence,
         }
