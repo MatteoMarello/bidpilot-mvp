@@ -92,21 +92,41 @@ VERDICT_CONFIG = {
     VerdictStatus.NO_GO: {
         "css": "v-nogo", "emoji": "🚫", "label": "NON PARTECIPARE",
         "desc": "Requisiti bloccanti non colmabili con le strutture ammesse."
-    }
+    },
+    VerdictStatus.ELIGIBLE_QUALIFICATION: {
+        "css": "v-go", "emoji": "✅", "label": "ELIGIBLE — QUALIFICAZIONE",
+        "desc": "Requisiti di qualificazione soddisfatti."
+    },
+    VerdictStatus.NOT_ELIGIBLE_QUALIFICATION: {
+        "css": "v-nogo", "emoji": "🚫", "label": "NON ELIGIBLE — QUALIFICAZIONE",
+        "desc": "Requisiti di qualificazione non soddisfatti."
+    },
+    VerdictStatus.ELIGIBLE_STAGE1: {
+        "css": "v-highrisk", "emoji": "⚠️", "label": "ELIGIBLE STAGE 1 — PPP",
+        "desc": "Ammissione stage 1. Valutare fasi successive."
+    },
 }
 
 STATUS_CSS = {
-    ReqStatus.OK: "req-ok", ReqStatus.FIXABLE: "req-fixable",
-    ReqStatus.KO: "req-ko", ReqStatus.UNKNOWN: "req-unknown"
+    ReqStatus.OK: "req-ok",
+    ReqStatus.FIXABLE: "req-fixable",
+    ReqStatus.KO: "req-ko",
+    ReqStatus.UNKNOWN: "req-unknown",
+    ReqStatus.RISK_FLAG: "req-unknown",
+    ReqStatus.PREMIANTE: "req-ok",
 }
 STATUS_ICON = {
-    ReqStatus.OK: "✅", ReqStatus.FIXABLE: "🔧",
-    ReqStatus.KO: "❌", ReqStatus.UNKNOWN: "❓"
+    ReqStatus.OK: "✅",
+    ReqStatus.FIXABLE: "🔧",
+    ReqStatus.KO: "❌",
+    ReqStatus.UNKNOWN: "❓",
+    ReqStatus.RISK_FLAG: "⚡",
+    ReqStatus.PREMIANTE: "🏆",
 }
 
 
 def render_verdict(report: DecisionReport):
-    cfg = VERDICT_CONFIG[report.verdict.status]
+    cfg = VERDICT_CONFIG.get(report.verdict.status, VERDICT_CONFIG[VerdictStatus.GO_HIGH_RISK])
     summary = report.verdict.summary or cfg["desc"]
     st.markdown(f"""
     <div class="verdict-box {cfg['css']}">
@@ -115,11 +135,25 @@ def render_verdict(report: DecisionReport):
     </div>
     """, unsafe_allow_html=True)
 
-    c1, c2 = st.columns(2)
-    leg_icon = "✅" if report.verdict.legal_eligibility == "eligible" else ("❌" if report.verdict.legal_eligibility == "not_eligible" else "❓")
-    op_icon  = "✅" if report.verdict.operational_feasibility == "feasible" else ("❌" if report.verdict.operational_feasibility == "not_feasible" else "⚠️")
-    c1.metric("Ammissibilità legale", f"{leg_icon} {report.verdict.legal_eligibility.replace('_', ' ').title()}")
-    c2.metric("Fattibilità operativa", f"{op_icon} {report.verdict.operational_feasibility.replace('_', ' ').title()}")
+    c1, c2, c3 = st.columns(3)
+    leg = report.verdict.legal_eligibility
+    op = report.verdict.operational_feasibility
+    conf = report.verdict.profile_confidence
+
+    leg_icon = "✅" if leg == "eligible" else ("❌" if leg == "not_eligible" else "❓")
+    op_icon  = "✅" if op == "feasible" else ("❌" if op == "not_feasible" else "⚠️")
+    conf_label = "COMPLETA" if conf == 1.0 else ("PROVVISORIA" if conf >= 0.7 else "INAFFIDABILE")
+    conf_icon = "🟢" if conf == 1.0 else ("🟡" if conf >= 0.7 else "🔴")
+
+    c1.metric("Ammissibilità legale", f"{leg_icon} {leg.replace('_', ' ').title()}")
+    c2.metric("Fattibilità operativa", f"{op_icon} {op.replace('_', ' ').title()}")
+    c3.metric("Confidence profilo", f"{conf_icon} {conf:.1f} — {conf_label}")
+
+    # PPP stage outputs
+    if report.verdict.stage_outputs:
+        st.info("**Output per fase (PPP)**")
+        for k, v in report.verdict.stage_outputs.items():
+            st.markdown(f"- **{k}**: {v}")
 
 
 def render_top_reasons(report: DecisionReport):
@@ -128,7 +162,8 @@ def render_top_reasons(report: DecisionReport):
     st.markdown("### 🎯 Ragioni principali")
     for r in report.top_reasons:
         icon = "❌" if r.severity == Severity.HARD_KO else "⚠️"
-        css = "req-ko" if r.severity == Severity.HARD_KO and not r.can_be_fixed else "req-fixable" if r.can_be_fixed else "req-unknown"
+        css = "req-ko" if (r.severity == Severity.HARD_KO and not r.can_be_fixed) \
+              else "req-fixable" if r.can_be_fixed else "req-unknown"
         fix_text = f" → **Risolvibile con:** {', '.join(r.fix_options)}" if r.can_be_fixed else ""
         ev_html = ""
         if r.evidence and r.evidence.quote:
@@ -144,10 +179,10 @@ def render_top_reasons(report: DecisionReport):
 def render_requirements(report: DecisionReport):
     results = report.requirements_results
     if not results:
+        st.info("Nessun requisito valutato.")
         return
     st.markdown("### 📋 Analisi Requisiti")
 
-    # Tabs per categoria
     cats = {
         "qualification": "🏗️ SOA",
         "certification": "🏆 Certificazioni",
@@ -158,6 +193,8 @@ def render_requirements(report: DecisionReport):
         "general": "📜 Generali",
         "guarantee": "🛡️ Garanzie",
         "participation": "🤝 Partecipazione",
+        "professional": "👤 Idoneità professionale",
+        "meta": "ℹ️ Classificazione",
     }
 
     by_cat = {}
@@ -165,42 +202,71 @@ def render_requirements(report: DecisionReport):
         by_cat.setdefault(r.category, []).append(r)
 
     # Sommario
-    ko_c = sum(1 for r in results if r.status == ReqStatus.KO)
-    fix_c = sum(1 for r in results if r.status == ReqStatus.FIXABLE)
-    ok_c = sum(1 for r in results if r.status == ReqStatus.OK)
-    unk_c = sum(1 for r in results if r.status == ReqStatus.UNKNOWN)
+    ko_c   = sum(1 for r in results if r.status == ReqStatus.KO)
+    fix_c  = sum(1 for r in results if r.status == ReqStatus.FIXABLE)
+    ok_c   = sum(1 for r in results if r.status == ReqStatus.OK)
+    unk_c  = sum(1 for r in results if r.status == ReqStatus.UNKNOWN)
+    risk_c = sum(1 for r in results if r.status == ReqStatus.RISK_FLAG)
+    prem_c = sum(1 for r in results if r.status == ReqStatus.PREMIANTE)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("✅ OK", ok_c)
     c2.metric("🔧 Colmabili", fix_c)
     c3.metric("❌ Bloccanti", ko_c)
     c4.metric("❓ Da verificare", unk_c)
+    c5.metric("⚡ Risk flag", risk_c)
+    c6.metric("🏆 Premianti", prem_c)
 
     st.markdown("---")
 
-    for cat_key, cat_label in cats.items():
+    # Mostra prima le categorie più critiche
+    priority_cats = ["qualification", "procedural", "general", "certification",
+                     "financial", "design", "guarantee", "participation",
+                     "professional", "operational", "meta"]
+    all_cats = priority_cats + [c for c in by_cat if c not in priority_cats]
+
+    for cat_key in all_cats:
         reqs = by_cat.get(cat_key, [])
         if not reqs:
             continue
-        with st.expander(f"{cat_label} ({len(reqs)} requisiti)", expanded=(cat_key in ("qualification", "procedural"))):
+        cat_label = cats.get(cat_key, f"📁 {cat_key.title()}")
+        has_ko = any(r.status in (ReqStatus.KO, ReqStatus.FIXABLE) and r.severity == Severity.HARD_KO
+                     for r in reqs)
+        expanded = cat_key in ("qualification", "procedural") or has_ko
+
+        with st.expander(f"{cat_label} ({len(reqs)} requisiti)", expanded=expanded):
             for r in reqs:
-                css = STATUS_CSS[r.status]
-                icon = STATUS_ICON[r.status]
-                sev_badge = "🔴" if r.severity == Severity.HARD_KO else ("🟡" if r.severity == Severity.SOFT_RISK else "🟢")
+                css = STATUS_CSS.get(r.status, "req-unknown")
+                icon = STATUS_ICON.get(r.status, "❓")
+                sev_badge = ("🔴" if r.severity == Severity.HARD_KO
+                             else "🟡" if r.severity == Severity.SOFT_RISK else "🟢")
+
+                # Evidence (primo elemento se presente)
                 ev_html = ""
-                if r.evidence and r.evidence[0].quote:
-                    ev_html = f'<div class="evidence-quote">📎 "{r.evidence[0].quote[:200]}" (p.{r.evidence[0].page})</div>'
+                if r.evidence:
+                    ev = r.evidence[0]
+                    if ev.quote:
+                        page_str = f" (p.{ev.page})" if ev.page else ""
+                        ev_html = f'<div class="evidence-quote">📎 "{ev.quote[:200]}"{page_str}</div>'
+
+                # Fixability
                 fix_html = ""
-                if r.fixability.is_fixable:
+                if r.fixability.is_fixable and r.fixability.allowed_methods:
                     fix_html = f"<br><small>🔧 Risolvibile con: <strong>{', '.join(r.fixability.allowed_methods)}</strong></small>"
                     if r.fixability.constraints:
                         fix_html += f"<br><small>⚠️ Vincoli: {'; '.join(r.fixability.constraints[:2])}</small>"
+
+                # Gap
                 gap_html = ""
                 if r.company_gap.missing_assets:
                     gap_html = f"<br><small>📌 Gap: {', '.join(r.company_gap.missing_assets)}</small>"
+
+                # Confidence badge
+                conf_badge = f" <small style='color:#6c757d'>conf:{r.confidence:.1f}</small>" if r.confidence < 1.0 else ""
+
                 st.markdown(f"""
                 <div class="req-card {css}">
-                  <strong>{icon} [{r.req_id}] {r.name}</strong> {sev_badge}
+                  <strong>{icon} [{r.req_id}] {r.name}</strong> {sev_badge}{conf_badge}
                   <br>{r.user_message}
                   {fix_html}{gap_html}{ev_html}
                 </div>
@@ -209,16 +275,17 @@ def render_requirements(report: DecisionReport):
 
 def render_action_plan(report: DecisionReport):
     ap = report.action_plan
-    if not ap.steps:
+    if not ap or not ap.steps:
         st.success("✅ Nessuna azione correttiva necessaria.")
         return
     st.markdown("### 🗺️ Piano d'Azione")
     path_map = {
-        "avvalimento": "🤝 Avvalimento",
-        "rti": "👥 RTI (Raggruppamento)",
-        "progettisti": "📐 Progettisti",
-        "subappalto": "🔨 Subappalto",
-        "none": "✅ Nessuna struttura necessaria"
+        "avvalimento":  "🤝 Avvalimento",
+        "rti":          "👥 RTI (Raggruppamento)",
+        "progettisti":  "📐 Progettisti",
+        "subappalto":   "🔨 Subappalto",
+        "subappalto_qualificante": "🔨 Subappalto qualificante",
+        "none":         "✅ Nessuna struttura necessaria"
     }
     st.info(f"**Percorso raccomandato:** {path_map.get(ap.recommended_path, ap.recommended_path)}")
 
@@ -253,7 +320,7 @@ def render_procedural_checklist(report: DecisionReport):
     st.markdown("### ✅ Checklist Procedurale")
     for item in items:
         icon = {"PENDING": "🔲", "DONE": "✅", "NOT_POSSIBLE": "🚫", "UNKNOWN": "❓"}.get(item.status, "❓")
-        impact_badge = "🔴" if item.impact == "HARD_KO" else "🟡"
+        impact_badge = "🔴" if item.impact == "HARD_KO" else ("🟡" if item.impact == "SOFT_RISK" else "⬜")
         deadline_str = f" — entro **{item.deadline}**" if item.deadline else ""
         st.markdown(f"- {icon} {impact_badge} **{item.item}**{deadline_str}")
 
@@ -264,10 +331,10 @@ def render_document_checklist(report: DecisionReport):
 
     sections = [
         ("📜 Amministrativi", dc.administrative),
-        ("🔧 Tecnici", dc.technical),
-        ("💶 Economici", dc.economic),
-        ("🛡️ Garanzie", dc.guarantees),
-        ("💻 Piattaforma", dc.platform),
+        ("🔧 Tecnici",        dc.technical),
+        ("💶 Economici",      dc.economic),
+        ("🛡️ Garanzie",      dc.guarantees),
+        ("💻 Piattaforma",    dc.platform),
     ]
     for label, items in sections:
         if not items:
@@ -303,9 +370,16 @@ def render_uncertainties(report: DecisionReport):
 
 
 def render_header(req: dict):
-    obj = req.get("oggetto_appalto", "N/D")
-    imp = req.get("importo_lavori")
+    obj  = req.get("oggetto_appalto", "N/D")
+    imp  = req.get("importo_lavori") or req.get("importo_base_gara")
     ente = req.get("stazione_appaltante", "N/D")
+    doc_type = req.get("document_type", "N/D")
+    engine_label = {
+        "sistema_qualificazione": "🔵 Sistema Qualificazione",
+        "disciplinare": "📋 Disciplinare",
+        "lettera_invito": "📩 Lettera invito",
+        "altro": "📄 Documento"
+    }.get(doc_type, f"📄 {doc_type}")
     imp_str = f"€{imp:,.0f}" if imp else "non specificato"
     st.markdown(f"""
     <div style="background:linear-gradient(135deg,#667eea,#764ba2);padding:1.8rem;
@@ -313,7 +387,8 @@ def render_header(req: dict):
       <h2 style="margin:0">{obj[:100]}{"..." if len(obj)>100 else ""}</h2>
       <p style="margin:0.5rem 0 0 0;font-size:1.05rem;">
         <strong>Importo:</strong> {imp_str} &nbsp;|&nbsp;
-        <strong>Ente:</strong> {ente}
+        <strong>Ente:</strong> {ente} &nbsp;|&nbsp;
+        <strong>Tipo:</strong> {engine_label}
       </p>
     </div>
     """, unsafe_allow_html=True)
@@ -323,48 +398,8 @@ def render_header(req: dict):
 
 
 # ══════════════════════════════════════════════════════════
-# Tabs
+# Render risultato completo
 # ══════════════════════════════════════════════════════════
-
-def tab_analisi():
-    st.header("📊 Analisi Bando — Decision Engine")
-
-    if not st.session_state.get("api_key"):
-        st.warning("⚠️ Inserire API Key nella sidebar")
-        return
-
-    uploaded = st.file_uploader("📄 Carica PDF Bando", type=["pdf"])
-    if not uploaded:
-        return
-
-    st.success(f"✅ File: {uploaded.name}")
-    if not st.button("🔍 ANALIZZA", type="primary", use_container_width=True):
-        return
-
-    with st.spinner("🤖 Estrazione e analisi in corso…"):
-        temp = f"data/temp_{uploaded.name}"
-        os.makedirs("data", exist_ok=True)
-        with open(temp, "wb") as f:
-            f.write(uploaded.getbuffer())
-
-        try:
-            parser = BandoParser()
-            text = parser.parse_pdf(temp, mode="full")
-            analyzer = BandoAnalyzer(
-                openai_api_key=st.session_state.api_key,
-                profilo_path="config/profilo_azienda.json"
-            )
-            result = analyzer.analyze_bando(text)
-            st.session_state.result = result
-            st.success("✅ Analisi completata!")
-        except Exception as e:
-            st.error(f"❌ {e}")
-            st.exception(e)
-            return
-
-    # Visualizza
-    _render_result(st.session_state.result)
-
 
 def _render_result(result: dict):
     report: DecisionReport = result["decision_report"]
@@ -374,12 +409,18 @@ def _render_result(result: dict):
     render_header(req)
     render_verdict(report)
 
-    # Barra avanzamento opzionale (valore secondario)
+    # Barra secondaria (legacy)
     legacy = result.get("legacy", {})
     score = legacy.get("punteggio_fattibilita", 0)
     if score:
         st.caption(f"Indicatore secondario: {score}/100")
         st.progress(score / 100)
+
+    # Engine mode badge
+    engine_mode = result.get("legacy", {}).get("engine_mode", "gara")
+    engine_note = result.get("legacy", {}).get("engine_note", "")
+    if engine_note:
+        st.info(engine_note)
 
     # Check geografico
     geo = legacy.get("check_geografico", {})
@@ -387,7 +428,6 @@ def _render_result(result: dict):
         st.warning(f"🗺️ {geo.get('motivo')}")
 
     render_top_reasons(report)
-
     st.markdown("---")
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -407,11 +447,72 @@ def _render_result(result: dict):
     with tab5:
         render_risk_register(report)
 
-    # Audit trace (collassato)
+    # Audit trace collassato
     with st.expander("🔍 Audit trace (sviluppatori)"):
         for entry in report.audit_trace:
             st.text(f"[{entry.event}] {entry.result} (conf: {entry.confidence:.2f})")
-        st.caption(f"Generato: {report.generated_at}")
+        st.caption(f"Generato: {report.generated_at} | Engine: {report.engine_mode}")
+
+
+# ══════════════════════════════════════════════════════════
+# Tab: Analisi Bando
+# ══════════════════════════════════════════════════════════
+
+def tab_analisi():
+    """Gestisce upload e analisi. NON chiama _render_result — lo fa main()."""
+    st.header("📊 Analisi Bando — Decision Engine")
+
+    if not st.session_state.get("api_key"):
+        st.warning("⚠️ Inserire API Key nella sidebar per procedere.")
+        return
+
+    uploaded = st.file_uploader("📄 Carica PDF Bando", type=["pdf"],
+                                 help="PDF con testo selezionabile (non scansionato)")
+    if not uploaded:
+        if not st.session_state.get("result"):
+            st.info("👆 Carica un PDF per iniziare l'analisi.")
+        return
+
+    st.success(f"✅ File caricato: **{uploaded.name}**")
+
+    if not st.button("🔍 ANALIZZA BANDO", type="primary", use_container_width=True):
+        return
+
+    # Esegui analisi
+    error_occurred = False
+    with st.spinner("🤖 Estrazione requisiti e analisi in corso… (30–60 secondi)"):
+        os.makedirs("data", exist_ok=True)
+        temp_path = f"data/temp_{uploaded.name}"
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(uploaded.getbuffer())
+
+            parser = BandoParser()
+            text = parser.parse_pdf(temp_path, mode="full")
+
+            analyzer = BandoAnalyzer(
+                openai_api_key=st.session_state.api_key,
+                profilo_path="config/profilo_azienda.json"
+            )
+            result = analyzer.analyze_bando(text)
+            st.session_state.result = result
+            st.session_state.analyzed_file = uploaded.name
+
+        except Exception as e:
+            st.error(f"❌ Errore durante l'analisi: {e}")
+            st.exception(e)
+            error_occurred = True
+        finally:
+            # Pulizia file temporaneo
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+    if not error_occurred and st.session_state.get("result"):
+        st.success("✅ Analisi completata! Risultati mostrati di seguito.")
+        st.rerun()  # Forza un rerun pulito per evitare doppio rendering
 
 
 # ══════════════════════════════════════════════════════════
@@ -420,8 +521,12 @@ def _render_result(result: dict):
 
 def sidebar():
     st.sidebar.title("⚙️ Configurazione")
-    key = st.sidebar.text_input("OpenAI API Key", type="password",
-                                value=st.session_state.get("api_key", ""))
+
+    key = st.sidebar.text_input(
+        "OpenAI API Key", type="password",
+        value=st.session_state.get("api_key", ""),
+        help="sk-proj-... dalla piattaforma OpenAI"
+    )
     if key:
         st.session_state.api_key = key
         st.sidebar.success("✅ Key configurata")
@@ -433,17 +538,37 @@ def sidebar():
     try:
         with open("config/profilo_azienda.json") as f:
             prof = json.load(f)
+        soa_count  = len(prof.get("soa_possedute", []))
+        cert_count = len([c for c in prof.get("certificazioni", []) if c.get("tipo", "").upper() != "SOA"])
+        zone       = ", ".join(prof.get("aree_geografiche", []))
         st.sidebar.info(
             f"**{prof['nome_azienda']}**\n\n"
-            f"SOA: {len(prof.get('soa_possedute', []))}\n"
-            f"Cert: {len([c for c in prof.get('certificazioni', []) if c.get('tipo') != 'SOA'])}\n"
-            f"Zone: {', '.join(prof.get('aree_geografiche', []))}"
+            f"SOA: {soa_count} attestati\n\n"
+            f"Cert: {cert_count} certificazioni\n\n"
+            f"Zone: {zone}"
         )
-    except Exception:
-        st.sidebar.error("Profilo non trovato — verificare config/profilo_azienda.json")
+    except FileNotFoundError:
+        st.sidebar.error("⚠️ `config/profilo_azienda.json` non trovato.")
+    except Exception as e:
+        st.sidebar.error(f"Errore profilo: {e}")
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**v3.0** • Decision Engine\n\n4 stati: GO / GO_HIGH_RISK / GO_WITH_STRUCTURE / NO_GO")
+
+    # Reset analisi
+    if st.session_state.get("result"):
+        file_name = st.session_state.get("analyzed_file", "bando")
+        st.sidebar.caption(f"📄 Ultimo analizzato: **{file_name}**")
+        if st.sidebar.button("🗑️ Nuova analisi", use_container_width=True):
+            st.session_state.result = None
+            st.session_state.analyzed_file = None
+            st.rerun()
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        "**BidPilot v3.0** — Decision Engine\n\n"
+        "4 stati: `GO` / `GO_HIGH_RISK` / `GO_WITH_STRUCTURE` / `NO_GO`\n\n"
+        "Libreria Requisiti v2.1 · 84 requisiti · 16 regole anti-inferenza"
+    )
 
 
 # ══════════════════════════════════════════════════════════
@@ -451,23 +576,46 @@ def sidebar():
 # ══════════════════════════════════════════════════════════
 
 def main():
+    # Inizializza session state
     if "api_key" not in st.session_state:
         st.session_state.api_key = None
     if "result" not in st.session_state:
         st.session_state.result = None
+    if "analyzed_file" not in st.session_state:
+        st.session_state.analyzed_file = None
 
     st.title("📋 BidPilot 3.0 — Decision Engine")
-    st.caption("GO / NO-GO deterministico con evidenze, action plan e audit trail • Anti-Allucinazione")
+    st.caption(
+        "GO / NO-GO deterministico con evidenze, action plan e audit trail · "
+        "Anti-Allucinazione · Libreria Requisiti v2.1"
+    )
 
     sidebar()
 
-    tab1, tab2 = st.tabs(["📊 Analisi Bando", "✍️ Bozze (WIP)"])
-    with tab1:
+    main_tab, drafts_tab = st.tabs(["📊 Analisi Bando", "✍️ Bozze (WIP)"])
+
+    with main_tab:
+        # Se c'è già un risultato in sessione, mostrarlo PRIMA del form upload
         if st.session_state.result:
             _render_result(st.session_state.result)
-        tab_analisi()
-    with tab2:
-        st.info("🚧 Modulo generazione bozze in sviluppo")
+            st.markdown("---")
+            st.caption("👇 Vuoi analizzare un altro bando? Usa il pulsante 'Nuova analisi' in sidebar o carica un nuovo PDF.")
+
+        # Sempre mostrare il form di analisi
+        # (se c'è già un risultato, serve per avviare una nuova analisi)
+        if not st.session_state.result:
+            tab_analisi()
+        else:
+            # Modalità compatta: solo uploader senza header ridondante
+            with st.expander("🔄 Analizza un altro bando"):
+                tab_analisi()
+
+    with drafts_tab:
+        st.info("🚧 Modulo generazione bozze offerta tecnica in sviluppo.")
+        st.markdown(
+            "Il modulo RAG per generazione bozze basate su progetti storici è previsto in **v3.1**.\n\n"
+            "Inserire PDF di progetti storici in `data/progetti_storici/` per prepararsi."
+        )
 
 
 if __name__ == "__main__":

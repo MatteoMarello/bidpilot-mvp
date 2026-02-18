@@ -1,6 +1,9 @@
 """
 BidPilot v4.0 - Schemi Pydantic
 Allineato alla Libreria Requisiti v2.1 (84 requisiti · D01–D23 · 16 regole anti-inferenza)
+Aggiornamento v4.1: aggiunto R42 (BIM competenze), R44 (BIM LOD), R49 (riservatezza),
+               R52 (CCT), R53 (tech claims), R54/R55 (concessione), R60 (piattaforma proroga)
+               R22/R23 (EOI selection), CERT synonyms support
 """
 from __future__ import annotations
 from pydantic import BaseModel, Field
@@ -30,16 +33,14 @@ class VerdictStatus(str, Enum):
     GO_WITH_STRUCTURE = "GO_WITH_STRUCTURE"
     GO_HIGH_RISK      = "GO_HIGH_RISK"
     GO                = "GO"
-    # Qualificazione (D11)
     ELIGIBLE_QUALIFICATION   = "ELIGIBLE_QUALIFICATION"
     NOT_ELIGIBLE_QUALIFICATION = "NOT_ELIGIBLE_QUALIFICATION"
-    # PPP multistage (D21)
     ELIGIBLE_STAGE1   = "ELIGIBLE_STAGE1"
 
 class Confidence(str, Enum):
-    HIGH    = "1.0"   # pattern esplicito: 'a pena di esclusione', 'è richiesto'
-    MEDIUM  = "0.7"   # trovato ma ambiguo
-    LOW     = "0.4"   # contesto, non prescrizione → mai HARD KO
+    HIGH    = "1.0"
+    MEDIUM  = "0.7"
+    LOW     = "0.4"
 
 
 # ══════════════════════════════════════════════════════════
@@ -127,15 +128,14 @@ class CompanyProfile(BaseModel):
     willing_subcontract: bool = True
     operating_regions: List[str] = Field(default_factory=list)
     start_date_constraints: str = ""
-    # Compliance CCNL
     ccnl_applied: str = ""
-    # Patente a crediti (D10)
     has_credit_license: Literal["yes", "no", "unknown"] = "unknown"
     credit_license_requested: bool = False
-    # PSF/PSFM (D16)
     psf_score: Optional[float] = None
-    # Bilanci depositati (D17)
     deposited_statements_count: int = 0
+    # BIM (R42)
+    has_bim_experience: bool = False
+    bim_experience_count: int = 0
 
 
 # ══════════════════════════════════════════════════════════
@@ -146,7 +146,7 @@ class Evidence(BaseModel):
     quote: str = ""
     page: int = 0
     section: str = ""
-    confidence: float = 1.0  # 1.0 / 0.7 / 0.4 — Libreria C.2
+    confidence: float = 1.0
 
 
 # ══════════════════════════════════════════════════════════
@@ -173,7 +173,6 @@ class RequirementResult(BaseModel):
     evidence: List[Evidence] = Field(default_factory=list)
     company_gap: CompanyGap = Field(default_factory=CompanyGap)
     user_message: str = ""
-    # Nuovo: confidence aggregata per questo requisito
     confidence: float = 1.0
 
 class TopReason(BaseModel):
@@ -239,9 +238,7 @@ class Verdict(BaseModel):
     legal_eligibility: Literal["eligible", "not_eligible", "uncertain"]
     operational_feasibility: Literal["feasible", "risky", "not_feasible", "uncertain"]
     summary: str = ""
-    # PPP multi-stage output (D21)
     stage_outputs: Optional[Dict[str, str]] = None
-    # Confidence profilo (C.2 Libreria)
     profile_confidence: float = 1.0
 
 class DecisionReport(BaseModel):
@@ -256,13 +253,11 @@ class DecisionReport(BaseModel):
     audit_trace: List[AuditEntry] = Field(default_factory=list)
     generated_at: str = ""
     tender_profile: Optional[Any] = None
-    # Modalità speciale (qualificazione D11 / PPP D21)
     engine_mode: Literal["gara", "qualificazione", "ppp_multistage"] = "gara"
 
 
 # ══════════════════════════════════════════════════════════
-# LEGACY: BandoRequisiti — estratto dall'LLM
-# v4.0: allineato alla Libreria Requisiti v2.1 completa
+# BandoRequisiti — estratto dall'LLM
 # ══════════════════════════════════════════════════════════
 
 class Scadenza(BaseModel):
@@ -286,7 +281,6 @@ class SOACategoria(BaseModel):
     evidence: Optional[str] = None
 
 class SOAEquivalenza(BaseModel):
-    """D01 — Equivalenze esplicite tra categorie SOA"""
     from_cat: str
     to_cat: str
     conditions_text: str = ""
@@ -308,60 +302,55 @@ class Garanzie(BaseModel):
     provvisoria: Optional[float] = None
     percentuale_provvisoria: Optional[float] = None
     definitiva: Optional[float] = None
-    # Riduzioni (R30)
     riduzione_iso9001: bool = False
     riduzione_mpmi: bool = False
 
 class CrediteLicense(BaseModel):
-    """D10 — Patente a crediti"""
     required: bool = False
-    trigger_condition: str = ""           # testo letterale dal disciplinare
-    trigger_soa_class_threshold: str = "" # es. "III"
+    trigger_condition: str = ""
+    trigger_soa_class_threshold: str = ""
     pena_esclusione: bool = False
 
 class BandoRequisiti(BaseModel):
-    """Schema v4.0 — allineato alla Libreria Requisiti v2.1 (84 requisiti)"""
+    """Schema v4.1 — Libreria Requisiti v2.1 completa (84 requisiti)"""
 
-    # ─── Metadati gara (R00a, R00b) ───────────────────────────────────────────
+    # ─── Metadati gara ────────────────────────────────────────────────────────
     oggetto_appalto: str
     oggetto_evidence: Optional[str] = None
-
     stazione_appaltante: str
     stazione_evidence: Optional[str] = None
 
-    # R00a — Tipo documento (Sezione A, Livello 0)
     document_type: Literal[
         "disciplinare", "lettera_invito", "avviso_eoi",
         "richiesta_preventivo", "verbale_esito", "avviso_manifestazione",
         "sistema_qualificazione", "altro"
     ] = "disciplinare"
 
-    # R00b — Famiglia procedurale
     procedure_family: Literal[
         "aperta", "negoziata", "negoziata_senza_bando",
         "eoi", "affidamento_diretto", "concessione",
         "accordo_quadro", "dialogo_competitivo", "altro"
     ] = "aperta"
 
-    procedure_legal_basis: Optional[str] = None  # es. "art.50", "art.71"
+    procedure_legal_basis: Optional[str] = None
 
-    # D11 — Pre-gate Sistema di Qualificazione
+    # D11 — Sistema di Qualificazione
     is_qualification_system: bool = False
-    qualification_system_owner: Optional[str] = None    # es. "RFI", "FSI"
+    qualification_system_owner: Optional[str] = None
     qualification_system_type: Optional[str] = None
     qualification_workflow: Optional[Literal[
         "prima_iscrizione", "estensione", "mantenimento", "dequalifica"
     ]] = None
 
-    # Flags procedurali speciali
+    # Flags speciali
     is_pnrr: bool = False
     is_bim: bool = False
     is_concession: bool = False
     is_eoi: bool = False
     is_accordo_quadro: bool = False
-    inversione_procedimentale: bool = False   # R50
+    inversione_procedimentale: bool = False
 
-    # ─── Importi (R24) ────────────────────────────────────────────────────────
+    # ─── Importi ──────────────────────────────────────────────────────────────
     importo_lavori: Optional[float] = None
     importo_evidence: Optional[str] = None
     importo_base_gara: Optional[float] = None
@@ -379,60 +368,59 @@ class BandoRequisiti(BaseModel):
     codice_cig: Optional[str] = None
     cpv: Optional[str] = None
 
-    # ─── Procedura / aggiudicazione ───────────────────────────────────────────
+    # ─── Procedura ────────────────────────────────────────────────────────────
     tipo_procedura: Optional[str] = None
-    criterio_aggiudicazione: Optional[str] = None   # "minor_prezzo" | "OEPV"
+    criterio_aggiudicazione: Optional[str] = None
     punteggio_tecnico: Optional[float] = None
     punteggio_economico: Optional[float] = None
-    lotti: int = 1                                  # D09
+    lotti: int = 1
 
-    # ─── Scadenze (R01, R05, R06) ─────────────────────────────────────────────
+    # ─── Scadenze ─────────────────────────────────────────────────────────────
     scadenze: List[Scadenza] = Field(default_factory=list)
 
-    # ─── Canale invio (R02) ───────────────────────────────────────────────────
+    # ─── Canale invio / piattaforma ───────────────────────────────────────────
     canale_invio: Literal["piattaforma", "PEC", "email", "misto", "unknown"] = "unknown"
     piattaforma_gara: Optional[str] = None
     piattaforma_url: Optional[str] = None
     piattaforma_spid_required: bool = False
-    piattaforma_failure_policy_exists: bool = False   # R17, R60
+    piattaforma_failure_policy_exists: bool = False   # R17 — info generico
 
-    # ─── SOA e categorie lavori (R24–R29, D01–D10) ────────────────────────────
+    # R60 — Piattaforma proroga (distinto da R17, più specifico)
+    platform_failure_extends_deadline: bool = False
+    platform_failure_notification_required: bool = False
+    platform_failure_oe_obligations: List[str] = Field(default_factory=list)
+
+    # ─── SOA ──────────────────────────────────────────────────────────────────
     soa_richieste: List[SOACategoria] = Field(default_factory=list)
-    soa_equivalences: List[SOAEquivalenza] = Field(default_factory=list)  # D01
-    soa_fifth_increase_allowed: Optional[bool] = None   # D02
-    soa_copy_required_pena_esclusione: bool = False      # D08
-    alt_qualification_allowed: bool = False              # R27
+    soa_equivalences: List[SOAEquivalenza] = Field(default_factory=list)
+    soa_fifth_increase_allowed: Optional[bool] = None
+    soa_copy_required_pena_esclusione: bool = False
+    alt_qualification_allowed: bool = False
     alt_qualification_type: Optional[Literal["art90", "art10_allII18"]] = None
-
-    # Beni culturali (D05, D06, D07)
     avvalimento_banned_categories: List[str] = Field(default_factory=list)
     cultural_works_dm154_required: bool = False
     cultural_works_dm154_pena_esclusione: bool = False
-
-    # D09 — Lotti: vincolo aggiudicazione
     lots_max_awardable_per_bidder: Optional[int] = None
     lots_priority_declaration_required: bool = False
-
-    # D10 — Patente a crediti
     credit_license: Optional[CrediteLicense] = None
 
-    # ─── Certificazioni (R28) ─────────────────────────────────────────────────
+    # ─── Certificazioni ───────────────────────────────────────────────────────
     certificazioni_richieste: List[str] = Field(default_factory=list)
 
-    # ─── Requisiti economico-finanziari (R20, R21) ────────────────────────────
+    # ─── Economico-finanziari ─────────────────────────────────────────────────
     fatturato_minimo_richiesto: Optional[float] = None
     fatturato_specifico_richiesto: Optional[float] = None
     fatturato_anni_riferimento: int = 3
-    referenze_num_min: Optional[int] = None            # R21 - numero contratti analoghi
-    referenze_valore_min: Optional[float] = None        # R21 - valore singolo/cumulato
-    referenze_anni_lookback: int = 3                    # R21
+    referenze_num_min: Optional[int] = None
+    referenze_valore_min: Optional[float] = None
+    referenze_anni_lookback: int = 3
 
-    # ─── Forme partecipazione (R10, R11, R12) ─────────────────────────────────
-    allowed_forms: List[str] = Field(default_factory=list)  # singolo/RTI/consorzio/rete/...
+    # ─── Forme partecipazione ─────────────────────────────────────────────────
+    allowed_forms: List[str] = Field(default_factory=list)
     rti_mandataria_quota_min: Optional[float] = None
     rti_mandante_quota_min: Optional[float] = None
 
-    # ─── Requisiti generali (R13–R17) ─────────────────────────────────────────
+    # ─── Requisiti generali ───────────────────────────────────────────────────
     dgue_required: bool = True
     dgue_format: Optional[str] = None
     dgue_sezioni_obbligatorie: List[str] = Field(default_factory=list)
@@ -440,130 +428,149 @@ class BandoRequisiti(BaseModel):
     patto_integrita_required: bool = False
     patto_integrita_pena_esclusione: bool = False
 
-    # ─── Idoneità professionale (R18, R19) ────────────────────────────────────
+    # ─── Idoneità professionale ───────────────────────────────────────────────
     albi_professionali_required: List[str] = Field(default_factory=list)
     figure_professionali_richieste: List[FiguraProfessionale] = Field(default_factory=list)
 
-    # ─── Lavoro/CCNL (R36, R37) ───────────────────────────────────────────────
+    # ─── CCNL / Lavoro ────────────────────────────────────────────────────────
     ccnl_reference: Optional[str] = None
     labour_costs_must_indicate: bool = False
     labour_costs_pena_esclusione: bool = False
     safety_company_costs_must_indicate: bool = False
     safety_costs_pena_esclusione: bool = False
 
-    # ─── Garanzie (R30, R31, R32) ─────────────────────────────────────────────
+    # ─── Garanzie ─────────────────────────────────────────────────────────────
     garanzie_richieste: Optional[Garanzie] = None
-    polizze_richieste: List[str] = Field(default_factory=list)   # CAR/RCT/RCO/RCP
+    polizze_richieste: List[str] = Field(default_factory=list)
 
-    # ─── Avvalimento e subappalto (R33, R34, R35) ─────────────────────────────
+    # ─── Avvalimento / subappalto ─────────────────────────────────────────────
     avvalimento_ammesso: Literal["yes", "no", "unknown"] = "unknown"
     avvalimento_regole: Optional[str] = None
-    avvalimento_banned_for_general: bool = True       # sempre vietato per generali
+    avvalimento_banned_for_general: bool = True
     avvalimento_migliorativo_ammesso: bool = False
-
     rti_ammesso: Literal["yes", "no", "unknown"] = "unknown"
     rti_regole: Optional[str] = None
-
     subappalto_percentuale_max: Optional[float] = None
     subappalto_regole: Optional[str] = None
     subappalto_cascade_ban: bool = True
-    subappalto_dichiarazione_dgue_pena_esclusione: bool = False   # R34
-    subappalto_qualificante_ammesso: Literal["yes", "no", "unknown"] = "unknown"  # R35
-    subappalto_qualificante_dichiarazione_pena_esclusione: bool = False  # D03
-    soa_prevalent_must_cover_subcontracted: bool = False          # D04
+    subappalto_dichiarazione_dgue_pena_esclusione: bool = False
+    subappalto_qualificante_ammesso: Literal["yes", "no", "unknown"] = "unknown"
+    subappalto_qualificante_dichiarazione_pena_esclusione: bool = False
+    soa_prevalent_must_cover_subcontracted: bool = False
 
-    # ─── ANAC / FVOE (R07, R08) ───────────────────────────────────────────────
+    # ─── ANAC / FVOE ──────────────────────────────────────────────────────────
     anac_contributo_richiesto: Literal["yes", "no", "unknown"] = "unknown"
     fvoe_required: bool = False
 
-    # ─── Sopralluogo (R06) ────────────────────────────────────────────────────
+    # ─── Sopralluogo ──────────────────────────────────────────────────────────
     sopralluogo_obbligatorio: bool = False
     sopralluogo_evidence: Optional[str] = None
 
-    # ─── Piattaforma (R03) ────────────────────────────────────────────────────
-    # già sopra: piattaforma_gara, piattaforma_url, piattaforma_spid_required
-
-    # ─── PNRR (R38, R39, R40) ─────────────────────────────────────────────────
+    # ─── PNRR ─────────────────────────────────────────────────────────────────
     pnrr_dnsh_required: bool = False
-    pnrr_principi_required: List[str] = Field(default_factory=list)  # gender, giovani...
+    pnrr_principi_required: List[str] = Field(default_factory=list)
     pnrr_clausola_sociale: Optional[str] = None
     cam_obbligatori: List[str] = Field(default_factory=list)
     cam_premianti: List[str] = Field(default_factory=list)
 
-    # ─── BIM (R41–R45) ────────────────────────────────────────────────────────
+    # ─── BIM R41–R45 ──────────────────────────────────────────────────────────
     bim_capitolato_informativo: bool = False
     bim_ogi_required: bool = False
     bim_ogi_valutazione_oepv: bool = False
     bim_ruoli_minimi: List[str] = Field(default_factory=list)
     bim_4d_required: bool = False
     bim_5d_required: bool = False
+    # R42 — Competenze BIM pregresse
+    bim_experience_required: bool = False
+    bim_experience_min_count: Optional[int] = None
+    bim_experience_min_amount: Optional[float] = None
+    bim_experience_is_admission: bool = False  # True=HARD req.; False=PREMIANTE
+    # R44 — LOD/IFC/as-built
+    bim_lod_min_fase: Optional[str] = None
+    bim_ifc_required: bool = False
+    bim_ifc_schema: Optional[str] = None
+    bim_as_built_required: bool = False
 
-    # ─── Appalto integrato (R46, R47) ─────────────────────────────────────────
+    # ─── Appalto integrato ────────────────────────────────────────────────────
     appalto_integrato: bool = False
     appalto_integrato_evidence: Optional[str] = None
     giovane_professionista_richiesto: Literal["yes", "no", "unknown"] = "unknown"
 
-    # ─── Offerta tecnica (R48, R49) ───────────────────────────────────────────
+    # ─── Offerta tecnica R48, R49 ─────────────────────────────────────────────
     tech_offer_divieto_prezzi_pena_esclusione: bool = False
     tech_offer_max_pagine: Optional[int] = None
     criteri_valutazione: List[Criterio] = Field(default_factory=list)
     vincoli_speciali: List[str] = Field(default_factory=list)
+    # R49 — Riservatezza segreti commerciali
+    tech_offer_riservatezza_required: bool = False
+    tech_offer_riservatezza_scope: Optional[str] = None
 
-    # ─── Vincoli esecutivi (R51, R52, M1) ────────────────────────────────────
+    # ─── Vincoli contrattuali R51–R53, M1 ────────────────────────────────────
     start_lavori_tassativo: Optional[str] = None
     vincoli_esecutivi: List[str] = Field(default_factory=list)
     quinto_obbligo: bool = False
     revisione_prezzi_soglia_pct: Optional[float] = None
+    # R52 — CCT e arbitrato
+    cct_previsto: bool = False
+    cct_composizione: Optional[int] = None
+    foro_competente: Optional[str] = None
+    arbitrato_escluso: bool = False
+    # R53 — Dichiarazioni tecniche soggette a prova documentale
+    tech_claims_must_be_provable: bool = False
+    tech_claims_verification_timing: Literal[
+        "pre_aggiudicazione", "post_aggiudicazione", "unknown"
+    ] = "unknown"
 
-    # ─── EOI specifici (R22, R23, R58, R59) ──────────────────────────────────
+    # ─── Concessione R54, R55 ────────────────────────────────────────────────
+    concession_price_in_tech_ko: bool = False
+    concession_offer_forbidden_forms: List[str] = Field(default_factory=list)
+    concession_above_base_is_ko: bool = False
+
+    # ─── EOI R22, R23, R58, R59 ──────────────────────────────────────────────
     eoi_invited_count_target: Optional[int] = None
     eoi_selection_criteria: List[str] = Field(default_factory=list)
+    eoi_selection_method: Literal["punteggio", "sorteggio", "ordine_arrivo", "unknown"] = "unknown"
     sa_reserve_rights: bool = False
+    # R22 — EOI esperienza territoriale (criterio selezione, NON KO gara — ANTI-INF-07)
+    eoi_territorial_experience_required: bool = False
+    eoi_territorial_area: Optional[str] = None
+    eoi_territorial_lookback_years: int = 5
+    # R23 — EOI dimensione aziendale (fattore amplificativo, non soglia)
+    eoi_size_factor_used: bool = False
+    eoi_employee_reference_year: Optional[int] = None
 
-    # ─── D11-D20: Sistema Qualificazione ─────────────────────────────────────
-    # D12
+    # ─── D11–D20: Sistema Qualificazione ─────────────────────────────────────
     qualification_requirements_on_submission: bool = False
     qualification_integration_only_if_owned: bool = False
-    # D13
     qualification_missing_docs_deadline_days: Optional[int] = None
     qualification_failure_effect: Optional[str] = None
-    # D14
     maintenance_variation_types: List[Dict[str, Any]] = Field(default_factory=list)
-    # D15
     maintenance_renewal_cycle_years: int = 3
     maintenance_submit_months_before: int = 6
     maintenance_timely_extends_validity: bool = False
     qualification_expiry_date: Optional[str] = None
-    # D16
-    psf_min_threshold: Optional[Any] = None   # float o "in_normativa_sottosistema"
+    psf_min_threshold: Optional[Any] = None
     psf_below_threshold_effect: Optional[str] = None
     psf_exception_concordato: bool = False
-    # D17
     financial_min_bilanci_applicant: int = 1
     financial_min_bilanci_auxiliary: int = 2
     financial_annual_update_required: bool = False
-    # D18
     avvalimento_non_frazionabili: List[str] = Field(default_factory=list)
     avvalimento_no_cascade: bool = True
-    # D19
     interpello_class_type: Optional[str] = None
     interpello_cap_rule: Optional[str] = None
     rete_soggettivita_giuridica_required: bool = False
-    # D20
     qualification_fee_required: bool = False
     qualification_fee_amounts: List[Dict[str, Any]] = Field(default_factory=list)
     qualification_site_visit_possible: bool = False
 
-    # ─── D21-D23: PPP / Grandi Opere ─────────────────────────────────────────
-    # D21
+    # ─── D21–D23: PPP / Grandi Opere ─────────────────────────────────────────
     procedure_multi_stage: bool = False
     procedure_stages: List[Dict[str, Any]] = Field(default_factory=list)
-    # D22
     ppp_private_share_percent: Optional[float] = None
     ppp_private_contribution_amount: Optional[float] = None
     ppp_spv_required: bool = False
     ppp_governance_constraints: Optional[str] = None
-    # D23
     security_special_regime: bool = False
     security_reference_text: Optional[str] = None
     security_admission_impact: Literal["esclusione", "condizione_esecutiva", "info"] = "info"
@@ -574,7 +581,7 @@ class BandoRequisiti(BaseModel):
 
 
 # ══════════════════════════════════════════════════════════
-# TenderProfile (struttura avanzata — output LLM v4.0)
+# TenderProfile
 # ══════════════════════════════════════════════════════════
 
 class Deadline(BaseModel):
