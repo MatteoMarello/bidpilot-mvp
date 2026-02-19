@@ -1,1115 +1,630 @@
 """
-BidPilot v3.0 — Decision Engine UI
-4 stati: NO_GO / GO_WITH_STRUCTURE / GO_HIGH_RISK / GO
+BidPilot MVP — BandoCard
+========================
+Output: BandoCard con 6 blocchi. Nessun GO/NO-GO, nessun punteggio.
+Profilo minimo (SOA + Certificazioni + Regioni) sufficiente per funzionare.
+
+Feature flag ADVANCED_MODE:
+  False (default) → MVP: solo BandoCard
+  True            → modalità avanzata: piano d'azione, risk register, checklist
 """
 import streamlit as st
 import os
 import json
 from datetime import datetime
 
-from src.parser import BandoParser
-from src.analyzer import BandoAnalyzer
-from src.schemas import DecisionReport, VerdictStatus, ReqStatus, Severity
+# ── Feature flag ──────────────────────────────────────
+ADVANCED_MODE = False   # Cambia a True per abilitare moduli avanzati
+# ──────────────────────────────────────────────────────
+
+from src.parser import parse_pdf as _parse_pdf
+from src.analyzer import analyze as _analyze
+from src.requirements_engine import evaluate_all
+from src.bando_card import build_bando_card, BandoCard, ReqItem
+from src.profile_builder import build_from_form, build_from_json
 
 st.set_page_config(
-    page_title="BidPilot — Decision Engine",
+    page_title="BidPilot — BandoCard",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ══════════════════════════════════════════════════════════
-# CSS — Design System Professionale
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
+# CSS
+# ══════════════════════════════════════════════════════
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
-/* Reset e base */
 *, *::before, *::after { box-sizing: border-box; }
 html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .stApp { background: #f4f5f7; }
-
-/* Nasconde elementi inutili — NON nascondere header: contiene il toggle sidebar */
 #MainMenu { visibility: hidden !important; }
 footer { display: none !important; }
-.block-container { padding: 1.5rem 2rem 2rem 2rem !important; max-width: 1400px; }
+.block-container { padding: 1.5rem 2rem 2rem 2rem !important; max-width: 1200px; }
 
-/* ── TOP HEADER BAR ── */
+/* Header */
 .app-header {
     background: linear-gradient(135deg, #0f1923 0%, #1a2a3a 100%);
-    border-radius: 16px;
-    padding: 1.4rem 2rem;
-    margin-bottom: 1.5rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    border-radius: 14px; padding: 1.2rem 1.8rem; margin-bottom: 1.4rem;
+    display: flex; align-items: center; justify-content: space-between;
     border: 1px solid #243447;
 }
-.app-header-title {
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: #fff;
-    letter-spacing: -0.3px;
-}
-.app-header-title span {
-    color: #3b82f6;
-}
-.app-header-sub {
-    font-size: 0.78rem;
-    color: #7a8fa6;
-    margin-top: 2px;
-    font-family: 'IBM Plex Mono', monospace;
-}
+.app-header-title { font-size: 1.35rem; font-weight: 700; color: #fff; }
+.app-header-title span { color: #3b82f6; }
+.app-header-sub { font-size: 0.75rem; color: #7a8fa6; margin-top: 2px; font-family: 'IBM Plex Mono', monospace; }
 .app-header-badge {
-    background: #1d3557;
-    color: #60a5fa;
-    font-size: 0.7rem;
-    font-weight: 600;
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-family: 'IBM Plex Mono', monospace;
-    border: 1px solid #2d4a6a;
-    letter-spacing: 0.5px;
-}
-
-/* ── TENDER INFO CARD ── */
-.tender-card {
-    background: linear-gradient(135deg, #0f1923 0%, #162032 100%);
-    border-radius: 14px;
-    padding: 1.6rem 2rem;
-    margin-bottom: 1.2rem;
-    border: 1px solid #1e3048;
-    position: relative;
-    overflow: hidden;
-}
-.tender-card::before {
-    content: '';
-    position: absolute;
-    top: 0; right: 0;
-    width: 200px; height: 200px;
-    background: radial-gradient(circle at top right, rgba(59,130,246,0.08) 0%, transparent 70%);
-    pointer-events: none;
-}
-.tender-title {
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: #e2e8f0;
-    line-height: 1.3;
-    margin-bottom: 0.8rem;
-}
-.tender-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.6rem;
-}
-.tender-chip {
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.1);
-    color: #94a3b8;
-    font-size: 0.75rem;
-    padding: 4px 10px;
-    border-radius: 6px;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
+    background: #1d3557; color: #60a5fa; font-size: 0.68rem; font-weight: 600;
+    padding: 4px 10px; border-radius: 6px; border: 1px solid #2d4a6a;
     font-family: 'IBM Plex Mono', monospace;
 }
-.tender-chip.highlight {
-    background: rgba(59,130,246,0.12);
-    border-color: rgba(59,130,246,0.3);
-    color: #93c5fd;
+
+/* BandoCard container */
+.bando-card {
+    background: white; border-radius: 14px; border: 1px solid #e2e8f0;
+    overflow: hidden; margin-bottom: 1rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+}
+.card-block-header {
+    background: #f8fafc; border-bottom: 1px solid #e2e8f0;
+    padding: 0.7rem 1.2rem; display: flex; align-items: center; gap: 0.5rem;
+}
+.card-block-icon { font-size: 1rem; }
+.card-block-title { font-size: 0.85rem; font-weight: 700; color: #0f172a; text-transform: uppercase; letter-spacing: 0.4px; }
+.card-block-body { padding: 1rem 1.2rem; }
+
+/* Identità gara */
+.gara-title { font-size: 1.1rem; font-weight: 600; color: #0f172a; line-height: 1.35; margin-bottom: 0.7rem; }
+.gara-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.chip {
+    background: #f1f5f9; border: 1px solid #e2e8f0; color: #64748b;
+    font-size: 0.72rem; padding: 3px 8px; border-radius: 5px;
+    font-family: 'IBM Plex Mono', monospace; font-weight: 500;
+}
+.chip.blue { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+.chip.green { background: #f0fdf4; border-color: #86efac; color: #15803d; }
+.chip.orange { background: #fff7ed; border-color: #fed7aa; color: #c2410c; }
+
+/* Scadenze */
+.deadline-row {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.5rem 0; border-bottom: 1px solid #f1f5f9; font-size: 0.84rem;
+}
+.deadline-row:last-child { border-bottom: none; }
+.deadline-label { color: #475569; flex: 1; }
+.deadline-date { font-family: 'IBM Plex Mono', monospace; color: #1e293b; font-weight: 600; }
+.deadline-badge {
+    font-size: 0.65rem; font-weight: 700; padding: 2px 6px; border-radius: 4px;
+    text-transform: uppercase; letter-spacing: 0.4px;
+}
+.badge-urgente { background: #fee2e2; color: #b91c1c; }
+.badge-scaduta { background: #fef3c7; color: #92400e; }
+.badge-ok { background: #f0fdf4; color: #15803d; }
+.deadline-mancante { color: #94a3b8; font-style: italic; font-size: 0.78rem; }
+
+/* Requisiti ✅❌❓ */
+.req-row {
+    display: flex; align-items: flex-start; gap: 0.7rem;
+    padding: 0.6rem 0; border-bottom: 1px solid #f8fafc;
+}
+.req-row:last-child { border-bottom: none; }
+.req-emoji { font-size: 1rem; flex-shrink: 0; margin-top: 1px; }
+.req-content { flex: 1; }
+.req-name { font-weight: 600; font-size: 0.85rem; color: #1e293b; }
+.req-msg { font-size: 0.78rem; color: #64748b; margin-top: 2px; line-height: 1.4; }
+.req-evidence {
+    background: #f8fafc; border-left: 3px solid #cbd5e1; padding: 4px 8px;
+    font-size: 0.72rem; font-style: italic; color: #64748b; border-radius: 0 4px 4px 0;
+    margin-top: 5px; font-family: 'IBM Plex Mono', monospace;
+}
+.req-note { font-size: 0.72rem; color: #94a3b8; margin-top: 2px; }
+.profile-empty-banner {
+    background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px;
+    padding: 0.6rem 0.9rem; margin-bottom: 0.8rem; font-size: 0.8rem; color: #92400e;
 }
 
-/* ── VERDICT CARD ── */
-.verdict-wrap {
-    border-radius: 14px;
-    padding: 1.8rem 2rem;
-    margin-bottom: 1.2rem;
-    display: flex;
-    align-items: flex-start;
-    gap: 1.4rem;
-    border: 1px solid;
-}
-.verdict-icon-box {
-    width: 64px;
-    height: 64px;
-    border-radius: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 2rem;
-    flex-shrink: 0;
-}
-.verdict-label {
-    font-size: 1.55rem;
-    font-weight: 700;
-    letter-spacing: -0.5px;
-    line-height: 1.2;
-}
-.verdict-sub {
-    font-size: 0.9rem;
-    margin-top: 0.3rem;
-    line-height: 1.5;
-}
-
-.v-go    { background: #f0fdf4; border-color: #86efac; }
-.v-go .verdict-label { color: #15803d; }
-.v-go .verdict-sub { color: #4ade80; }
-.v-go .verdict-icon-box { background: #dcfce7; }
-
-.v-highrisk { background: #fffbeb; border-color: #fde68a; }
-.v-highrisk .verdict-label { color: #b45309; }
-.v-highrisk .verdict-sub { color: #d97706; }
-.v-highrisk .verdict-icon-box { background: #fef3c7; }
-
-.v-structure { background: #eff6ff; border-color: #93c5fd; }
-.v-structure .verdict-label { color: #1d4ed8; }
-.v-structure .verdict-sub { color: #3b82f6; }
-.v-structure .verdict-icon-box { background: #dbeafe; }
-
-.v-nogo { background: #fff1f2; border-color: #fca5a5; }
-.v-nogo .verdict-label { color: #b91c1c; }
-.v-nogo .verdict-sub { color: #ef4444; }
-.v-nogo .verdict-icon-box { background: #fee2e2; }
-
-/* ── STAT CARDS ── */
-.stat-row {
-    display: grid;
-    grid-template-columns: repeat(6, 1fr);
-    gap: 0.6rem;
-    margin-bottom: 1.2rem;
-}
-.stat-card {
-    background: white;
-    border-radius: 10px;
-    padding: 0.9rem 1rem;
-    text-align: center;
+/* Info operative */
+.info-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; }
+.info-item {
+    background: #f8fafc; border-radius: 8px; padding: 0.6rem 0.8rem;
     border: 1px solid #e2e8f0;
-    transition: box-shadow 0.15s;
 }
-.stat-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
-.stat-num {
-    font-size: 1.6rem;
-    font-weight: 700;
-    line-height: 1;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.stat-label {
-    font-size: 0.67rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-top: 3px;
-}
-.s-ok   .stat-num { color: #16a34a; }
-.s-ok   .stat-label { color: #86efac; }
-.s-fix  .stat-num { color: #2563eb; }
-.s-fix  .stat-label { color: #93c5fd; }
-.s-ko   .stat-num { color: #dc2626; }
-.s-ko   .stat-label { color: #fca5a5; }
-.s-unk  .stat-num { color: #d97706; }
-.s-unk  .stat-label { color: #fcd34d; }
-.s-risk .stat-num { color: #7c3aed; }
-.s-risk .stat-label { color: #c4b5fd; }
-.s-prem .stat-num { color: #0891b2; }
-.s-prem .stat-label { color: #67e8f9; }
+.info-item-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.4px; color: #94a3b8; font-weight: 600; }
+.info-item-val { font-size: 0.85rem; font-weight: 600; color: #1e293b; margin-top: 2px; }
+.info-si { color: #dc2626; }
+.info-no { color: #16a34a; }
+.info-unknown { color: #d97706; }
 
-/* ── REQUIREMENT CARDS ── */
-.req-card {
-    background: white;
-    border-radius: 10px;
-    padding: 0.85rem 1rem;
-    margin: 0.35rem 0;
-    border: 1px solid #e2e8f0;
-    border-left: 4px solid;
-    transition: box-shadow 0.12s;
+/* Da verificare */
+.dv-item {
+    display: flex; align-items: flex-start; gap: 0.5rem;
+    padding: 0.5rem 0; border-bottom: 1px solid #fef3c7; font-size: 0.82rem; color: #78350f;
 }
-.req-card:hover { box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
-.req-ok       { border-left-color: #22c55e; }
-.req-fixable  { border-left-color: #3b82f6; }
-.req-ko       { border-left-color: #ef4444; }
-.req-unknown  { border-left-color: #f59e0b; }
-.req-risk     { border-left-color: #8b5cf6; }
-.req-prem     { border-left-color: #06b6d4; }
+.dv-item:last-child { border-bottom: none; }
 
-.req-id {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.68rem;
-    font-weight: 600;
-    background: #f1f5f9;
-    color: #64748b;
-    padding: 2px 6px;
-    border-radius: 4px;
-    margin-right: 6px;
-}
-.req-name { font-weight: 600; font-size: 0.88rem; color: #1e293b; }
-.req-msg  { font-size: 0.82rem; color: #475569; margin-top: 4px; line-height: 1.5; }
-.req-fix  { font-size: 0.78rem; color: #2563eb; margin-top: 4px; font-weight: 500; }
-.req-gap  { font-size: 0.78rem; color: #dc2626; margin-top: 3px; }
-.req-ev   {
-    background: #f8fafc;
-    border-left: 3px solid #cbd5e1;
-    padding: 4px 8px;
-    font-size: 0.75rem;
-    font-style: italic;
-    color: #64748b;
-    border-radius: 0 4px 4px 0;
-    margin-top: 6px;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.sev-badge {
-    font-size: 0.62rem;
-    font-weight: 700;
-    padding: 1px 5px;
-    border-radius: 3px;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    margin-left: 5px;
-}
-.sev-hard { background: #fee2e2; color: #b91c1c; }
-.sev-soft { background: #fef3c7; color: #92400e; }
-.conf-badge {
-    font-size: 0.62rem;
-    font-family: 'IBM Plex Mono', monospace;
-    color: #94a3b8;
-    margin-left: 5px;
-}
+/* Sidebar */
+.sidebar-section { margin-bottom: 1rem; }
+.sidebar-section-title { font-size: 0.78rem; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 0.4rem; }
 
-/* ── ACTION STEPS ── */
-.action-step {
-    background: white;
-    border-radius: 12px;
-    padding: 1.1rem 1.3rem;
-    margin: 0.5rem 0;
-    border: 1px solid #e2e8f0;
-    display: flex;
-    gap: 1rem;
-    align-items: flex-start;
-    transition: box-shadow 0.12s;
-}
-.action-step:hover { box-shadow: 0 4px 14px rgba(0,0,0,0.07); }
-.step-num {
-    background: #0f1923;
-    color: white;
-    border-radius: 50%;
-    width: 34px;
-    height: 34px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    font-size: 0.85rem;
-    flex-shrink: 0;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.step-body { flex: 1; }
-.step-title { font-weight: 600; font-size: 0.92rem; color: #0f172a; }
-.step-why   { font-size: 0.8rem; color: #64748b; margin-top: 2px; }
-
-/* ── CHECKLIST ── */
-.check-item {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.7rem;
-    padding: 0.55rem 0;
-    border-bottom: 1px solid #f1f5f9;
-    font-size: 0.84rem;
-}
-.check-item:last-child { border-bottom: none; }
-.check-icon { flex-shrink: 0; font-size: 1rem; margin-top: 1px; }
-.check-text { color: #334155; line-height: 1.4; }
-.check-deadline {
-    font-size: 0.72rem;
-    font-family: 'IBM Plex Mono', monospace;
-    color: #ef4444;
-    font-weight: 600;
-    margin-top: 2px;
-}
-
-/* ── DOC ITEM ── */
-.doc-item {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.6rem;
-    padding: 0.45rem 0.7rem;
-    border-radius: 7px;
-    margin: 0.2rem 0;
-    font-size: 0.82rem;
-}
-.doc-required { background: #fff1f2; }
-.doc-optional { background: #f8fafc; }
-.doc-name { font-weight: 500; color: #1e293b; }
-.doc-note { font-size: 0.72rem; color: #94a3b8; margin-top: 1px; }
-
-/* ── RISK CARD ── */
-.risk-card {
-    border-radius: 10px;
-    padding: 0.9rem 1.1rem;
-    margin: 0.4rem 0;
-    border-left: 4px solid;
-    font-size: 0.83rem;
-}
-.risk-HIGH   { background: #fff1f2; border-left-color: #ef4444; color: #7f1d1d; }
-.risk-MEDIUM { background: #fffbeb; border-left-color: #f59e0b; color: #78350f; }
-.risk-LOW    { background: #f0fdf4; border-left-color: #22c55e; color: #14532d; }
-.risk-id { font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; opacity: 0.7; }
-
-/* ── REASON CARD ── */
-.reason-card {
-    background: white;
-    border-radius: 10px;
-    padding: 0.9rem 1.1rem;
-    margin: 0.4rem 0;
-    border: 1px solid;
-    font-size: 0.83rem;
-}
-.reason-ko   { border-color: #fca5a5; background: #fff1f2; }
-.reason-fix  { border-color: #93c5fd; background: #eff6ff; }
-.reason-unk  { border-color: #fde68a; background: #fffbeb; }
-
-/* ── SIDEBAR CUSTOM ── */
-.sidebar-company {
-    background: linear-gradient(135deg, #0f1923 0%, #1a2733 100%);
-    border-radius: 12px;
-    padding: 1.1rem;
-    margin: 0.5rem 0;
-    border: 1px solid #243447;
-}
-.sidebar-company-name {
-    font-weight: 700;
-    color: #e2e8f0;
-    font-size: 0.95rem;
-}
-.sidebar-stat {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 4px 0;
-    font-size: 0.78rem;
-    border-bottom: 1px solid rgba(255,255,255,0.06);
-}
-.sidebar-stat:last-child { border-bottom: none; }
-.sidebar-stat-key { color: #7a8fa6; }
-.sidebar-stat-val { color: #93c5fd; font-weight: 600; font-family: 'IBM Plex Mono', monospace; }
-.sidebar-soa-tag {
-    display: inline-block;
-    background: rgba(59,130,246,0.15);
-    color: #93c5fd;
-    border: 1px solid rgba(59,130,246,0.25);
-    border-radius: 5px;
-    font-size: 0.7rem;
-    font-family: 'IBM Plex Mono', monospace;
-    padding: 2px 7px;
-    margin: 2px;
-    font-weight: 600;
-}
-
-/* ── TABS override ── */
-.stTabs [data-baseweb="tab-list"] {
-    background: transparent;
-    gap: 4px;
-}
-.stTabs [data-baseweb="tab"] {
-    background: white;
-    border-radius: 8px !important;
-    border: 1px solid #e2e8f0 !important;
-    color: #64748b !important;
-    font-size: 0.82rem !important;
-    font-weight: 500 !important;
-    padding: 6px 14px !important;
-    transition: all 0.15s !important;
-}
-.stTabs [aria-selected="true"] {
-    background: #0f1923 !important;
-    color: white !important;
-    border-color: #0f1923 !important;
-}
-.stTabs [data-baseweb="tab-panel"] {
-    background: transparent;
-    padding-top: 1rem;
-}
-
-/* ── UPLOAD AREA ── */
+/* Upload */
 .upload-zone {
-    background: white;
-    border: 2px dashed #cbd5e1;
-    border-radius: 14px;
-    padding: 2.5rem;
-    text-align: center;
-    transition: border-color 0.2s;
-    margin: 1rem 0;
+    background: white; border: 2px dashed #cbd5e1; border-radius: 12px;
+    padding: 2rem; text-align: center; margin: 0.8rem 0;
 }
-.upload-zone:hover { border-color: #3b82f6; }
-.upload-icon { font-size: 2.5rem; margin-bottom: 0.5rem; }
-.upload-title { font-size: 1rem; font-weight: 600; color: #1e293b; }
-.upload-sub { font-size: 0.8rem; color: #94a3b8; margin-top: 4px; }
-
-/* ── SECTION HEADER ── */
-.section-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin: 1.2rem 0 0.7rem;
-    padding-bottom: 0.5rem;
-    border-bottom: 2px solid #f1f5f9;
-}
-.section-header-icon {
-    width: 28px;
-    height: 28px;
-    background: #0f1923;
-    border-radius: 7px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.75rem;
-    color: white;
-}
-.section-header-text {
-    font-size: 0.95rem;
-    font-weight: 700;
-    color: #0f172a;
-}
-
-/* ── PATH BADGE ── */
-.path-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: #eff6ff;
-    border: 1px solid #bfdbfe;
-    color: #1d4ed8;
-    font-size: 0.82rem;
-    font-weight: 600;
-    padding: 6px 14px;
-    border-radius: 8px;
-    margin-bottom: 1rem;
-}
-
-/* ── METRIC TRIO ── */
-.metric-trio {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 0.6rem;
-    margin: 0.8rem 0 1.2rem;
-}
-.metric-box {
-    background: white;
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    padding: 0.75rem 1rem;
-    text-align: center;
-}
-.metric-box-label { font-size: 0.7rem; color: #94a3b8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
-.metric-box-val   { font-size: 1.1rem; font-weight: 700; color: #1e293b; margin-top: 2px; }
+.upload-icon { font-size: 2rem; margin-bottom: 0.4rem; }
+.upload-title { font-size: 0.95rem; font-weight: 600; color: #1e293b; }
+.upload-sub { font-size: 0.77rem; color: #94a3b8; margin-top: 3px; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════════
-# Config verdetti
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
+# UI COMPONENTS
+# ══════════════════════════════════════════════════════
 
-VERDICT_CFG = {
-    VerdictStatus.GO: {
-        "css": "v-go", "emoji": "✅", "label": "PARTECIPA",
-        "desc": "Tutti i requisiti verificati. Nessun blocco rilevato.",
-    },
-    VerdictStatus.GO_HIGH_RISK: {
-        "css": "v-highrisk", "emoji": "⚠️", "label": "PARTECIPA — ALTA ATTENZIONE",
-        "desc": "Ammissibile, ma con rischi operativi o documentali da gestire.",
-    },
-    VerdictStatus.GO_WITH_STRUCTURE: {
-        "css": "v-structure", "emoji": "🔵", "label": "PARTECIPA CON STRUTTURA",
-        "desc": "Possibile con RTI / avvalimento / progettisti. Vedi Piano d'Azione.",
-    },
-    VerdictStatus.NO_GO: {
-        "css": "v-nogo", "emoji": "🚫", "label": "NON PARTECIPARE",
-        "desc": "Requisiti bloccanti non colmabili con le strutture ammesse.",
-    },
-    VerdictStatus.ELIGIBLE_QUALIFICATION: {
-        "css": "v-go", "emoji": "✅", "label": "ELIGIBLE — QUALIFICAZIONE",
-        "desc": "Requisiti di qualificazione soddisfatti.",
-    },
-    VerdictStatus.NOT_ELIGIBLE_QUALIFICATION: {
-        "css": "v-nogo", "emoji": "🚫", "label": "NON ELIGIBLE — QUALIFICAZIONE",
-        "desc": "Requisiti di qualificazione non soddisfatti.",
-    },
-    VerdictStatus.ELIGIBLE_STAGE1: {
-        "css": "v-highrisk", "emoji": "⚠️", "label": "ELIGIBLE STAGE 1 — PPP",
-        "desc": "Ammissione stage 1. Valutare fasi successive separatamente.",
-    },
-}
-
-STATUS_CSS = {
-    ReqStatus.OK: "req-ok",
-    ReqStatus.FIXABLE: "req-fixable",
-    ReqStatus.KO: "req-ko",
-    ReqStatus.UNKNOWN: "req-unknown",
-    ReqStatus.RISK_FLAG: "req-risk",
-    ReqStatus.PREMIANTE: "req-prem",
-}
-STATUS_ICON = {
-    ReqStatus.OK: "✅",
-    ReqStatus.FIXABLE: "🔧",
-    ReqStatus.KO: "❌",
-    ReqStatus.UNKNOWN: "❓",
-    ReqStatus.RISK_FLAG: "⚡",
-    ReqStatus.PREMIANTE: "🏆",
-}
-
-
-# ══════════════════════════════════════════════════════════
-# Componenti UI
-# ══════════════════════════════════════════════════════════
-
-def render_header_bar():
-    st.markdown("""
+def render_header():
+    mode_badge = "ADVANCED MODE 🔓" if ADVANCED_MODE else "BANDO CARD MVP"
+    st.markdown(f"""
     <div class="app-header">
       <div>
         <div class="app-header-title">⚡ Bid<span>Pilot</span></div>
-        <div class="app-header-sub">Decision Engine v3.0 · Anti-Allucinazione · 84 Requisiti</div>
+        <div class="app-header-sub">BandoCard · Evidence-first · Matching ✅❌❓</div>
       </div>
-      <div class="app-header-badge">GO / NO-GO DETERMINISTICO</div>
+      <div class="app-header-badge">{mode_badge}</div>
     </div>
     """, unsafe_allow_html=True)
 
 
-def render_tender_header(req: dict):
-    obj  = req.get("oggetto_appalto", "N/D")
-    imp  = req.get("importo_lavori") or req.get("importo_base_gara")
-    ente = req.get("stazione_appaltante", "N/D")
-    doc_type = req.get("document_type", "N/D")
-    cig  = req.get("codice_cig", "")
-    imp_str = f"€ {imp:,.0f}" if imp else "—"
+def render_req_item(item: ReqItem):
+    ev_html = ""
+    if item.evidence_quote:
+        pg = f" (p.{item.evidence_page})" if item.evidence_page else ""
+        q = item.evidence_quote[:200]
+        ev_html = f'<div class="req-evidence">📎 "{q}"{pg}</div>'
 
-    type_label = {
-        "disciplinare": "📋 Disciplinare",
-        "lettera_invito": "📩 Lettera invito",
-        "sistema_qualificazione": "🔵 Sis. Qualificazione",
-        "avviso_eoi": "📢 EOI",
-        "richiesta_preventivo": "📑 Preventivo",
-        "altro": "📄 Documento"
-    }.get(doc_type, f"📄 {doc_type}")
-
-    cig_chip = f'<span class="tender-chip"><span>CIG</span> {cig}</span>' if cig else ""
-    ev = req.get("importo_evidence", "")
-    ev_html = f'<div class="req-ev" style="margin-top:0.7rem;">📎 {ev[:180]}</div>' if ev else ""
+    note_html = f'<div class="req-note">{item.note}</div>' if item.note else ""
 
     st.markdown(f"""
-    <div class="tender-card">
-      <div class="tender-title">{obj[:140]}{"…" if len(obj) > 140 else ""}</div>
-      <div class="tender-meta">
-        <span class="tender-chip highlight">💶 {imp_str}</span>
-        <span class="tender-chip">🏛️ {ente[:50]}</span>
-        <span class="tender-chip">{type_label}</span>
-        {cig_chip}
+    <div class="req-row">
+      <div class="req-emoji">{item.emoji}</div>
+      <div class="req-content">
+        <div class="req-name">{item.name}</div>
+        <div class="req-msg">{item.message}</div>
+        {ev_html}{note_html}
       </div>
-      {ev_html}
     </div>
     """, unsafe_allow_html=True)
 
 
-def render_verdict(report: DecisionReport):
-    cfg = VERDICT_CFG.get(report.verdict.status, VERDICT_CFG[VerdictStatus.GO_HIGH_RISK])
-    summary = report.verdict.summary or cfg["desc"]
+def render_bando_card(card: BandoCard):
+    # ── BLOCCO 1 — IDENTITÀ GARA ──────────────────────
+    imp_str = f"€ {card.importo:,.0f}" if card.importo else "Importo da verificare"
+    cig_chip = f'<span class="chip blue">CIG {card.cig}</span>' if card.cig else '<span class="chip orange">CIG da verificare</span>'
+    lotti_chip = f'<span class="chip">🗂️ {card.lotti} lotto/i</span>' if card.lotti > 1 else ""
+    pnrr_chip = '<span class="chip orange">🔷 PNRR</span>' if card.is_pnrr else ""
+    imp_chip = f'<span class="chip blue">💶 {imp_str}</span>'
 
-    # Confidence display
-    conf = report.verdict.profile_confidence
-    conf_color = "#16a34a" if conf == 1.0 else ("#d97706" if conf >= 0.7 else "#dc2626")
-    conf_label = "Profilo completo" if conf == 1.0 else ("Parzialmente verificato" if conf >= 0.7 else "Dati insufficienti")
+    ev_html = ""
+    if card.importo_evidence:
+        q = card.importo_evidence[:150]
+        ev_html = f'<div class="req-evidence" style="margin-top:0.6rem">📎 "{q}"</div>'
 
     st.markdown(f"""
-    <div class="verdict-wrap {cfg['css']}">
-      <div class="verdict-icon-box">{cfg['emoji']}</div>
-      <div style="flex:1">
-        <div class="verdict-label">{cfg['label']}</div>
-        <div class="verdict-sub">{summary}</div>
+    <div class="bando-card">
+      <div class="card-block-header">
+        <span class="card-block-icon">🏛️</span>
+        <span class="card-block-title">Identità Gara</span>
       </div>
-      <div style="text-align:right; min-width:130px">
-        <div style="font-size:0.68rem; text-transform:uppercase; letter-spacing:0.5px; color:#94a3b8; font-weight:600;">CONFIDENCE</div>
-        <div style="font-size:1.5rem; font-weight:700; color:{conf_color}; font-family:'IBM Plex Mono',monospace;">{conf:.0%}</div>
-        <div style="font-size:0.7rem; color:{conf_color}; font-weight:500;">{conf_label}</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Metriche legale/operativa
-    leg = report.verdict.legal_eligibility
-    op  = report.verdict.operational_feasibility
-    leg_icon = "✅" if leg == "eligible" else ("❌" if leg == "not_eligible" else "❓")
-    op_icon  = "✅" if op  == "feasible"  else ("❌" if op == "not_feasible"   else "⚠️")
-
-    st.markdown(f"""
-    <div class="metric-trio">
-      <div class="metric-box">
-        <div class="metric-box-label">Ammissibilità legale</div>
-        <div class="metric-box-val">{leg_icon} {leg.replace('_',' ').title()}</div>
-      </div>
-      <div class="metric-box">
-        <div class="metric-box-label">Fattibilità operativa</div>
-        <div class="metric-box-val">{op_icon} {op.replace('_',' ').title()}</div>
-      </div>
-      <div class="metric-box">
-        <div class="metric-box-label">Engine attivo</div>
-        <div class="metric-box-val" style="font-size:0.85rem">⚙️ {report.engine_mode.replace('_',' ').title()}</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    if report.verdict.stage_outputs:
-        st.info("**Output per fase (PPP)**")
-        for k, v in report.verdict.stage_outputs.items():
-            st.markdown(f"- **{k}**: {v}")
-
-
-def render_top_reasons(report: DecisionReport):
-    if not report.top_reasons:
-        return
-    st.markdown("""
-    <div class="section-header">
-      <div class="section-header-icon">🎯</div>
-      <div class="section-header-text">Ragioni Principali</div>
-    </div>
-    """, unsafe_allow_html=True)
-    for r in report.top_reasons:
-        css = ("reason-ko" if (r.severity == Severity.HARD_KO and not r.can_be_fixed)
-               else "reason-fix" if r.can_be_fixed else "reason-unk")
-        icon = "❌" if (r.severity == Severity.HARD_KO and not r.can_be_fixed) else "🔧" if r.can_be_fixed else "❓"
-        fix_html = ""
-        if r.can_be_fixed and r.fix_options:
-            opts = ", ".join(r.fix_options)
-            fix_html = f'<div style="font-size:0.78rem;color:#2563eb;margin-top:4px;font-weight:500;">🔧 Risolvibile con: {opts}</div>'
-        ev_html = ""
-        if r.evidence and r.evidence.quote:
-            ev_html = f'<div class="req-ev">📎 "{r.evidence.quote[:200]}"</div>'
-        req_id_html = f'<span class="req-id">{r.issue_type}</span>' if r.issue_type else ""
-        st.markdown(f"""
-        <div class="reason-card {css}">
-          {req_id_html}<strong>{icon} {r.message[:220]}</strong>
-          {fix_html}{ev_html}
+      <div class="card-block-body">
+        <div class="gara-title">{card.oggetto}</div>
+        <div class="gara-chips">
+          {imp_chip}
+          <span class="chip">🏛️ {card.ente[:60]}</span>
+          <span class="chip">📋 {card.tipo_procedura}</span>
+          {cig_chip}
+          {lotti_chip}
+          {pnrr_chip}
         </div>
-        """, unsafe_allow_html=True)
-
-
-def render_requirements_summary(results):
-    ko_c   = sum(1 for r in results if r.status == ReqStatus.KO)
-    fix_c  = sum(1 for r in results if r.status == ReqStatus.FIXABLE)
-    ok_c   = sum(1 for r in results if r.status == ReqStatus.OK)
-    unk_c  = sum(1 for r in results if r.status == ReqStatus.UNKNOWN)
-    risk_c = sum(1 for r in results if r.status == ReqStatus.RISK_FLAG)
-    prem_c = sum(1 for r in results if r.status == ReqStatus.PREMIANTE)
-    st.markdown(f"""
-    <div class="stat-row">
-      <div class="stat-card s-ok">
-        <div class="stat-num">{ok_c}</div>
-        <div class="stat-label">OK ✅</div>
-      </div>
-      <div class="stat-card s-fix">
-        <div class="stat-num">{fix_c}</div>
-        <div class="stat-label">Colmabili 🔧</div>
-      </div>
-      <div class="stat-card s-ko">
-        <div class="stat-num">{ko_c}</div>
-        <div class="stat-label">Bloccanti ❌</div>
-      </div>
-      <div class="stat-card s-unk">
-        <div class="stat-num">{unk_c}</div>
-        <div class="stat-label">Da verif. ❓</div>
-      </div>
-      <div class="stat-card s-risk">
-        <div class="stat-num">{risk_c}</div>
-        <div class="stat-label">Risk Flag ⚡</div>
-      </div>
-      <div class="stat-card s-prem">
-        <div class="stat-num">{prem_c}</div>
-        <div class="stat-label">Premianti 🏆</div>
+        {ev_html}
       </div>
     </div>
     """, unsafe_allow_html=True)
 
+    # ── BLOCCO 2 — SCADENZE ────────────────────────────
+    if card.scadenze:
+        rows_html = ""
+        for sc in card.scadenze:
+            if sc.data:
+                date_str = f"{sc.data}" + (f" {sc.ora}" if sc.ora else "")
+                if sc.scaduta:
+                    badge = '<span class="deadline-badge badge-scaduta">⚠️ SCADUTA</span>'
+                elif sc.urgente:
+                    badge = f'<span class="deadline-badge badge-urgente">🔴 {sc.giorni_mancanti}gg</span>'
+                else:
+                    badge = f'<span class="deadline-badge badge-ok">{sc.giorni_mancanti}gg</span>' if sc.giorni_mancanti is not None else ""
+                rows_html += f"""
+                <div class="deadline-row">
+                  <span class="deadline-label">{sc.label}</span>
+                  <span class="deadline-date">{date_str}</span>
+                  {badge}
+                </div>"""
+            else:
+                rows_html += f"""
+                <div class="deadline-row">
+                  <span class="deadline-label">{sc.label}</span>
+                  <span class="deadline-mancante">Da verificare nel documento</span>
+                </div>"""
 
-def render_requirements(report: DecisionReport):
-    results = report.requirements_results
-    if not results:
-        st.info("Nessun requisito valutato.")
-        return
-
-    render_requirements_summary(results)
-
-    CATS = {
-        "qualification":   ("🏗️", "SOA e Qualificazione"),
-        "certification":   ("🏆", "Certificazioni"),
-        "procedural":      ("🔒", "Gate Procedurali"),
-        "design":          ("📐", "Progettazione e BIM"),
-        "financial":       ("💶", "Economico-Finanziari"),
-        "operational":     ("⏱️", "Vincoli Operativi"),
-        "general":         ("📜", "Requisiti Generali"),
-        "guarantee":       ("🛡️", "Garanzie e Polizze"),
-        "participation":   ("🤝", "Forme di Partecipazione"),
-        "professional":    ("👤", "Idoneità Professionale"),
-        "meta":            ("ℹ️", "Classificazione"),
-    }
-    by_cat: dict = {}
-    for r in results:
-        by_cat.setdefault(r.category, []).append(r)
-
-    priority = list(CATS.keys())
-    all_cats = priority + [c for c in by_cat if c not in priority]
-
-    for cat_key in all_cats:
-        reqs = by_cat.get(cat_key, [])
-        if not reqs:
-            continue
-        icon, label = CATS.get(cat_key, ("📁", cat_key.title()))
-        has_hard = any(r.status in (ReqStatus.KO, ReqStatus.FIXABLE) and r.severity == Severity.HARD_KO for r in reqs)
-        ko_in_cat = sum(1 for r in reqs if r.status == ReqStatus.KO)
-        fix_in_cat = sum(1 for r in reqs if r.status == ReqStatus.FIXABLE)
-        counter = f"  🔴 {ko_in_cat}" if ko_in_cat else (f"  🔵 {fix_in_cat}" if fix_in_cat else "")
-
-        with st.expander(f"{icon} {label} ({len(reqs)}){counter}", expanded=has_hard):
-            for r in reqs:
-                css = STATUS_CSS.get(r.status, "req-unknown")
-                icon_s = STATUS_ICON.get(r.status, "❓")
-                sev_cls = "sev-hard" if r.severity == Severity.HARD_KO else "sev-soft" if r.severity == Severity.SOFT_RISK else ""
-                sev_lbl = "HARD KO" if r.severity == Severity.HARD_KO else "SOFT" if r.severity == Severity.SOFT_RISK else ""
-                sev_html = f'<span class="sev-badge {sev_cls}">{sev_lbl}</span>' if sev_cls else ""
-                conf_html = f'<span class="conf-badge">conf {r.confidence:.1f}</span>' if r.confidence < 1.0 else ""
-
-                ev_html = ""
-                if r.evidence:
-                    ev = r.evidence[0]
-                    if ev.quote:
-                        p = f" (p.{ev.page})" if ev.page else ""
-                        ev_html = f'<div class="req-ev">📎 "{ev.quote[:200]}"{p}</div>'
-
-                fix_html = ""
-                if r.fixability.is_fixable and r.fixability.allowed_methods:
-                    methods = ", ".join(r.fixability.allowed_methods)
-                    fix_html = f'<div class="req-fix">🔧 Risolvibile con: <strong>{methods}</strong></div>'
-                    if r.fixability.constraints:
-                        cnstr = " · ".join(r.fixability.constraints[:2])
-                        fix_html += f'<div style="font-size:0.74rem;color:#d97706;margin-top:2px">⚠️ {cnstr}</div>'
-
-                gap_html = ""
-                if r.company_gap.missing_assets:
-                    gaps = ", ".join(r.company_gap.missing_assets[:3])
-                    gap_html = f'<div class="req-gap">📌 Gap: {gaps}</div>'
-
-                st.markdown(f"""
-                <div class="req-card {css}">
-                  <span class="req-id">{r.req_id}</span>
-                  <span class="req-name">{icon_s} {r.name}</span>
-                  {sev_html}{conf_html}
-                  <div class="req-msg">{r.user_message}</div>
-                  {fix_html}{gap_html}{ev_html}
-                </div>
-                """, unsafe_allow_html=True)
-
-
-def render_action_plan(report: DecisionReport):
-    ap = report.action_plan
-    if not ap or not ap.steps:
-        st.success("✅ Nessuna azione correttiva necessaria — partecipazione diretta.")
-        return
-
-    path_labels = {
-        "avvalimento": "🤝 Avvalimento",
-        "rti": "👥 RTI — Raggruppamento Temporaneo",
-        "progettisti": "📐 Gruppo di Progettazione",
-        "subappalto": "🔨 Subappalto",
-        "subappalto_qualificante": "🔨 Subappalto Qualificante",
-        "none": "✅ Partecipazione diretta",
-    }
-    path_lbl = path_labels.get(ap.recommended_path, ap.recommended_path)
-    st.markdown(f'<div class="path-badge">Percorso raccomandato: {path_lbl}</div>', unsafe_allow_html=True)
-
-    for step in ap.steps:
-        ev_html = ""
-        if step.evidence:
-            ev = step.evidence[0]
-            if ev.quote:
-                ev_html = f'<div class="req-ev" style="margin-top:6px">📎 "{ev.quote[:150]}"</div>'
         st.markdown(f"""
-        <div class="action-step">
-          <div class="step-num">{step.step}</div>
-          <div class="step-body">
-            <div class="step-title">{step.title}</div>
-            <div class="step-why">{step.why}</div>
-            {ev_html}
+        <div class="bando-card">
+          <div class="card-block-header">
+            <span class="card-block-icon">📅</span>
+            <span class="card-block-title">Scadenze</span>
           </div>
+          <div class="card-block-body">{rows_html}</div>
         </div>
         """, unsafe_allow_html=True)
-        col1, col2 = st.columns(2)
-        if step.inputs_needed:
-            with col1:
-                with st.expander(f"📥 Cosa serve (step {step.step})"):
-                    for inp in step.inputs_needed:
-                        st.markdown(f"- {inp}")
-        if step.risks:
-            with col2:
-                with st.expander(f"⚠️ Rischi (step {step.step})"):
-                    for rsk in step.risks:
-                        st.markdown(f"- 🔴 {rsk}")
 
+    # ── BLOCCO 3 — SOA RICHIESTE ──────────────────────
+    if card.soa_items:
+        soa_summary_ok = sum(1 for i in card.soa_items if i.stato == "ok")
+        soa_summary_ko = sum(1 for i in card.soa_items if i.stato == "ko")
+        soa_summary_unk = sum(1 for i in card.soa_items if i.stato == "unknown")
 
-def render_checklist(report: DecisionReport):
-    items = report.procedural_checklist
-    if not items:
-        return
-    st.markdown("""
-    <div class="section-header">
-      <div class="section-header-icon">✅</div>
-      <div class="section-header-text">Checklist Procedurale</div>
-    </div>
-    """, unsafe_allow_html=True)
-    for item in items:
-        status_icon = {"PENDING": "🔲", "DONE": "✅", "NOT_POSSIBLE": "🚫", "UNKNOWN": "❓"}.get(item.status, "❓")
-        impact_dot = "🔴" if item.impact == "HARD_KO" else ("🟡" if item.impact == "SOFT_RISK" else "⬜")
-        deadline_html = f'<div class="check-deadline">⏰ Entro {item.deadline}</div>' if item.deadline else ""
         st.markdown(f"""
-        <div class="check-item">
-          <span class="check-icon">{status_icon}</span>
-          <div>
-            <div class="check-text">{impact_dot} <strong>{item.item}</strong></div>
-            {deadline_html}
+        <div class="bando-card">
+          <div class="card-block-header">
+            <span class="card-block-icon">🏗️</span>
+            <span class="card-block-title">SOA Richieste</span>
+            &nbsp;
+            <span class="chip green">✅ {soa_summary_ok}</span>
+            <span class="chip" style="background:#fff1f2;border-color:#fca5a5;color:#b91c1c">❌ {soa_summary_ko}</span>
+            <span class="chip orange">❓ {soa_summary_unk}</span>
           </div>
-        </div>
+          <div class="card-block-body">
         """, unsafe_allow_html=True)
 
-    # Uncertainties bloccanti
-    uncs = [u for u in report.uncertainties if u.blocks_verdict]
-    if uncs:
-        st.markdown("""
-        <div class="section-header" style="margin-top:1.2rem">
-          <div class="section-header-icon">❓</div>
-          <div class="section-header-text">Domande Aperte (bloccanti)</div>
-        </div>
-        """, unsafe_allow_html=True)
-        for u in uncs:
-            st.warning(f"**{u.question}**\n\n_{u.why_needed}_")
-
-
-def render_documents(report: DecisionReport):
-    dc = report.document_checklist
-    sections = [
-        ("📜 Amministrativi", dc.administrative, True),
-        ("🔧 Tecnici",        dc.technical,       True),
-        ("💶 Economici",      dc.economic,        False),
-        ("🛡️ Garanzie",      dc.guarantees,      False),
-        ("💻 Piattaforma",    dc.platform,        False),
-    ]
-    for label, items, expanded in sections:
-        if not items:
-            continue
-        with st.expander(f"{label} ({len(items)})", expanded=expanded):
-            for d in items:
-                css = "doc-required" if d.mandatory else "doc-optional"
-                dot = "🔴" if d.mandatory else "🟡"
-                note_html = f'<div class="doc-note">{d.notes}</div>' if d.notes else ""
-                st.markdown(f"""
-                <div class="doc-item {css}">
-                  <span>{dot}</span>
-                  <div>
-                    <div class="doc-name">{d.name}</div>
-                    {note_html}
-                  </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-
-def render_risks(report: DecisionReport):
-    if not report.risk_register:
-        st.success("✅ Nessun rischio critico identificato.")
-        return
-    high = [r for r in report.risk_register if r.level == "HIGH"]
-    med  = [r for r in report.risk_register if r.level == "MEDIUM"]
-    low  = [r for r in report.risk_register if r.level == "LOW"]
-    for level_label, items in [("🔴 Alta Priorità", high), ("🟡 Media Priorità", med), ("🟢 Bassa Priorità", low)]:
-        if not items:
-            continue
-        st.markdown(f"**{level_label}**")
-        for r in items:
-            mit_html = ""
-            if r.mitigations:
-                mits = "".join(f"<li>{m}</li>" for m in r.mitigations)
-                mit_html = f'<div style="margin-top:5px;font-size:0.78rem;color:#475569"><ul style="margin:0;padding-left:1.2rem">{mits}</ul></div>'
-            st.markdown(f"""
-            <div class="risk-card risk-{r.level}">
-              <div class="risk-id">[{r.risk_id}] {r.risk_type}</div>
-              <div style="margin-top:3px;font-weight:500">{r.message}</div>
-              {mit_html}
+        if card.soa_profile_empty:
+            st.markdown("""
+            <div class="profile-empty-banner">
+              ❓ Nessuna SOA inserita nel profilo — inserisci le tue attestazioni nella sidebar per vedere il matching.
             </div>
             """, unsafe_allow_html=True)
 
+        for item in card.soa_items:
+            render_req_item(item)
 
-# ══════════════════════════════════════════════════════════
-# Render risultato completo
-# ══════════════════════════════════════════════════════════
+        st.markdown("</div></div>", unsafe_allow_html=True)
 
-def _render_result(result: dict):
-    report: DecisionReport = result["decision_report"]
-    req = result["requisiti_estratti"]
-    legacy = result.get("legacy", {})
+    # ── BLOCCO 4 — CERTIFICAZIONI ─────────────────────
+    if card.cert_items:
+        cert_ok = sum(1 for i in card.cert_items if i.stato == "ok")
+        cert_ko = sum(1 for i in card.cert_items if i.stato == "ko")
+        cert_unk = sum(1 for i in card.cert_items if i.stato == "unknown")
 
-    render_tender_header(req)
+        st.markdown(f"""
+        <div class="bando-card">
+          <div class="card-block-header">
+            <span class="card-block-icon">🏆</span>
+            <span class="card-block-title">Certificazioni</span>
+            &nbsp;
+            <span class="chip green">✅ {cert_ok}</span>
+            <span class="chip" style="background:#fff1f2;border-color:#fca5a5;color:#b91c1c">❌ {cert_ko}</span>
+            <span class="chip orange">❓ {cert_unk}</span>
+          </div>
+          <div class="card-block-body">
+        """, unsafe_allow_html=True)
 
-    # Warning geografico
-    geo = legacy.get("check_geografico", {})
-    if geo.get("warning"):
-        st.warning(f"🗺️ {geo.get('motivo')}")
+        if card.cert_profile_empty:
+            st.markdown("""
+            <div class="profile-empty-banner">
+              ❓ Nessuna certificazione inserita nel profilo — inserisci le tue certificazioni nella sidebar per vedere il matching.
+            </div>
+            """, unsafe_allow_html=True)
 
-    # Engine note
-    engine_note = legacy.get("engine_note", "")
-    if engine_note:
-        st.info(engine_note)
+        for item in card.cert_items:
+            render_req_item(item)
 
-    render_verdict(report)
-    render_top_reasons(report)
+        st.markdown("</div></div>", unsafe_allow_html=True)
 
-    st.markdown('<div style="height:0.4rem"></div>', unsafe_allow_html=True)
+    # ── BLOCCO 5 — INFO OPERATIVE ─────────────────────
+    info = card.info_op
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📋 Requisiti",
-        "🗺️ Piano d'Azione",
-        "✅ Checklist",
-        "📂 Documenti",
-        "⚠️ Rischi",
-    ])
-    with tab1:
-        render_requirements(report)
-    with tab2:
-        render_action_plan(report)
-    with tab3:
-        render_checklist(report)
-    with tab4:
-        render_documents(report)
-    with tab5:
-        render_risks(report)
+    def yn(val: bool, si_label="SÌ", no_label="NO"):
+        if val:
+            return f'<span class="info-si">⚠️ {si_label}</span>'
+        return f'<span class="info-no">✅ {no_label}</span>'
 
-    with st.expander("🔍 Audit Trace (sviluppatori)"):
-        for entry in report.audit_trace:
-            st.code(f"[{entry.event}] {entry.result}  conf:{entry.confidence:.2f}", language=None)
-        st.caption(f"Generato: {report.generated_at} · Engine: {report.engine_mode}")
+    def yn_str(val: str):
+        if val == "si":
+            return '<span class="info-si">⚠️ SÌ</span>'
+        if val == "no":
+            return '<span class="info-no">✅ NO</span>'
+        return '<span class="info-unknown">❓ Da verificare</span>'
+
+    piatt_str = info.piattaforma or "Non identificata"
+    spid_str = " (SPID richiesto)" if info.piattaforma_spid else ""
+    canale_str = info.canale_invio if info.canale_invio != "unknown" else "da verificare"
+
+    st.markdown(f"""
+    <div class="bando-card">
+      <div class="card-block-header">
+        <span class="card-block-icon">⚙️</span>
+        <span class="card-block-title">Info Operative</span>
+      </div>
+      <div class="card-block-body">
+        <div class="info-grid">
+          <div class="info-item">
+            <div class="info-item-label">Sopralluogo</div>
+            <div class="info-item-val">{yn(info.sopralluogo_obbligatorio, "OBBLIGATORIO a pena esclusione", "NON richiesto")}</div>
+          </div>
+          <div class="info-item">
+            <div class="info-item-label">Piattaforma invio</div>
+            <div class="info-item-val">{piatt_str}{spid_str}</div>
+          </div>
+          <div class="info-item">
+            <div class="info-item-label">Contributo ANAC</div>
+            <div class="info-item-val">{yn_str(info.contributo_anac)}</div>
+          </div>
+          <div class="info-item">
+            <div class="info-item-label">PNRR</div>
+            <div class="info-item-val">{yn(info.pnrr, "SÌ — DNSH obbligatorio", "NO")}</div>
+          </div>
+          <div class="info-item">
+            <div class="info-item-label">Appalto integrato</div>
+            <div class="info-item-val">{yn(info.appalto_integrato, "SÌ — progettisti richiesti", "NO")}</div>
+          </div>
+          <div class="info-item">
+            <div class="info-item-label">Canale invio</div>
+            <div class="info-item-val">{canale_str}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── BLOCCO 6 — DA VERIFICARE ──────────────────────
+    if card.da_verificare:
+        dv_html = "".join(
+            f'<div class="dv-item"><span>❓</span><span>{msg}</span></div>'
+            for msg in card.da_verificare
+        )
+        st.markdown(f"""
+        <div class="bando-card" style="border-color:#fde68a">
+          <div class="card-block-header" style="background:#fffbeb;border-color:#fde68a">
+            <span class="card-block-icon">❓</span>
+            <span class="card-block-title" style="color:#92400e">Da Verificare ({len(card.da_verificare)})</span>
+          </div>
+          <div class="card-block-body" style="background:#fffbeb">{dv_html}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── ADVANCED MODE (disabilitato nel MVP) ──────────
+    if ADVANCED_MODE and hasattr(st.session_state, "full_result"):
+        _render_advanced(st.session_state.full_result)
 
 
-# ══════════════════════════════════════════════════════════
-# Sidebar
-# ══════════════════════════════════════════════════════════
+def _render_advanced(result: dict):
+    """Moduli avanzati — attivi solo con ADVANCED_MODE=True."""
+    st.markdown("---")
+    st.markdown("### 🔬 Modalità Avanzata")
+    st.info("Piano d'azione, risk register e checklist — funzionalità post-MVP.")
 
-def sidebar():
+
+# ══════════════════════════════════════════════════════
+# SIDEBAR — PROFILO MINIMO
+# ══════════════════════════════════════════════════════
+
+def sidebar_profile():
+    """Form profilo minimo nella sidebar. Restituisce MinimalProfile."""
     with st.sidebar:
         st.markdown("### ⚙️ Configurazione")
 
-        key = st.text_input(
-            "OpenAI API Key", type="password",
+        # API Key
+        api_key = st.text_input(
+            "Anthropic API Key",
+            type="password",
             value=st.session_state.get("api_key", ""),
-            placeholder="sk-proj-…",
-            help="Ottieni la key su platform.openai.com"
+            placeholder="sk-ant-…",
+            help="Ottieni la key su console.anthropic.com",
         )
-        if key:
-            st.session_state.api_key = key
+        if api_key:
+            st.session_state.api_key = api_key
             st.success("✅ API Key configurata")
         else:
             st.warning("⚠️ Inserire API Key per procedere")
 
         st.markdown("---")
-        st.markdown("**👤 Profilo Aziendale**")
 
-        try:
-            with open("config/profilo_azienda.json") as f:
-                prof = json.load(f)
+        # ── Selezione modalità profilo ──────────────────
+        profile_mode = st.radio(
+            "Profilo aziendale",
+            ["📝 Inserisci manualmente", "📂 Carica da profilo_azienda.json"],
+            index=0,
+            horizontal=False,
+        )
 
-            soa_list = prof.get("soa_possedute", [])
-            cert_list = [c for c in prof.get("certificazioni", []) if c.get("tipo", "").upper() != "SOA"]
-            zone = " · ".join(prof.get("aree_geografiche", [])[:3])
-            soa_tags = "".join(
-                f'<span class="sidebar-soa-tag">{s["categoria"]} {s["classifica"]}</span>'
-                for s in soa_list
+        minimal_profile = None
+
+        if profile_mode == "📂 Carica da profilo_azienda.json":
+            try:
+                with open("config/profilo_azienda.json") as f:
+                    prof_data = json.load(f)
+                minimal_profile = build_from_json(prof_data)
+                soa_tags = " ".join(
+                    f"`{s['categoria']} {s['classifica']}`"
+                    for s in prof_data.get("soa_possedute", [])
+                )
+                st.success(f"✅ **{prof_data.get('nome_azienda', 'Azienda')}**")
+                st.caption(f"SOA: {soa_tags or 'nessuna'}")
+                certs = [c["tipo"] for c in prof_data.get("certificazioni", []) if c.get("tipo", "").upper() != "SOA"]
+                st.caption(f"Cert: {', '.join(certs) or 'nessuna'}")
+            except FileNotFoundError:
+                st.warning("⚠️ File `config/profilo_azienda.json` non trovato. Usa il form manuale.")
+                profile_mode = "📝 Inserisci manualmente"
+            except Exception as e:
+                st.error(f"Errore caricamento profilo: {e}")
+                profile_mode = "📝 Inserisci manualmente"
+
+        if profile_mode == "📝 Inserisci manualmente":
+            st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+            st.markdown("**🏗️ SOA Possedute**")
+
+            # Inizializza dati SOA in session_state
+            if "soa_entries" not in st.session_state:
+                st.session_state.soa_entries = [{"categoria": "", "classifica": "I", "scadenza": ""}]
+
+            soa_to_remove = None
+            for i, entry in enumerate(st.session_state.soa_entries):
+                col1, col2, col3, col4 = st.columns([2, 1.5, 2, 0.5])
+                with col1:
+                    cat = st.text_input(f"Categoria", value=entry.get("categoria", ""), key=f"soa_cat_{i}", placeholder="es. OS6", label_visibility="collapsed")
+                with col2:
+                    cls = st.selectbox(f"Classifica", ["I", "II", "III", "IV", "IV-bis", "V", "VI", "VII", "VIII"], index=["I", "II", "III", "IV", "IV-bis", "V", "VI", "VII", "VIII"].index(entry.get("classifica", "I")) if entry.get("classifica", "I") in ["I", "II", "III", "IV", "IV-bis", "V", "VI", "VII", "VIII"] else 0, key=f"soa_cls_{i}", label_visibility="collapsed")
+                with col3:
+                    scad = st.text_input(f"Scadenza", value=entry.get("scadenza", ""), key=f"soa_scad_{i}", placeholder="YYYY-MM-DD", label_visibility="collapsed")
+                with col4:
+                    if st.button("✕", key=f"soa_del_{i}", help="Rimuovi") and len(st.session_state.soa_entries) > 1:
+                        soa_to_remove = i
+
+                st.session_state.soa_entries[i] = {"categoria": cat.upper().strip(), "classifica": cls, "scadenza": scad}
+
+            if soa_to_remove is not None:
+                st.session_state.soa_entries.pop(soa_to_remove)
+                st.rerun()
+
+            if st.button("➕ Aggiungi SOA", use_container_width=True):
+                st.session_state.soa_entries.append({"categoria": "", "classifica": "I", "scadenza": ""})
+                st.rerun()
+
+            st.markdown("**🏆 Certificazioni Possedute**")
+            if "cert_entries" not in st.session_state:
+                st.session_state.cert_entries = [{"tipo": "", "scadenza": ""}]
+
+            cert_to_remove = None
+            for i, entry in enumerate(st.session_state.cert_entries):
+                col1, col2, col3 = st.columns([2.5, 2, 0.5])
+                with col1:
+                    tipo = st.text_input(f"Tipo", value=entry.get("tipo", ""), key=f"cert_tipo_{i}", placeholder="es. ISO 9001", label_visibility="collapsed")
+                with col2:
+                    scad = st.text_input(f"Scad.", value=entry.get("scadenza", ""), key=f"cert_scad_{i}", placeholder="YYYY-MM-DD", label_visibility="collapsed")
+                with col3:
+                    if st.button("✕", key=f"cert_del_{i}", help="Rimuovi") and len(st.session_state.cert_entries) > 1:
+                        cert_to_remove = i
+
+                st.session_state.cert_entries[i] = {"tipo": tipo.strip(), "scadenza": scad}
+
+            if cert_to_remove is not None:
+                st.session_state.cert_entries.pop(cert_to_remove)
+                st.rerun()
+
+            if st.button("➕ Aggiungi Certificazione", use_container_width=True):
+                st.session_state.cert_entries.append({"tipo": "", "scadenza": ""})
+                st.rerun()
+
+            st.markdown("**🗺️ Regioni Operative**")
+            regioni_input = st.text_input(
+                "Regioni",
+                value=", ".join(st.session_state.get("regioni", [])),
+                placeholder="es. Piemonte, Lombardia",
+                label_visibility="collapsed",
             )
+            regioni = [r.strip() for r in regioni_input.split(",") if r.strip()]
+            st.session_state.regioni = regioni
 
-            st.markdown(f"""
-            <div class="sidebar-company">
-              <div class="sidebar-company-name">{prof['nome_azienda']}</div>
-              <div style="font-size:0.72rem;color:#7a8fa6;margin-bottom:0.5rem">{prof.get('sede','')}</div>
-              <div class="sidebar-stat">
-                <span class="sidebar-stat-key">Zone operative</span>
-                <span class="sidebar-stat-val">{len(prof.get('aree_geografiche', []))}</span>
-              </div>
-              <div class="sidebar-stat">
-                <span class="sidebar-stat-key">SOA possedute</span>
-                <span class="sidebar-stat-val">{len(soa_list)}</span>
-              </div>
-              <div class="sidebar-stat">
-                <span class="sidebar-stat-key">Certificazioni</span>
-                <span class="sidebar-stat-val">{len(cert_list)}</span>
-              </div>
-              <div style="margin-top:0.5rem">{soa_tags}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            st.caption(f"🗺️ {zone}")
+            # Build profile from form
+            soa_clean = [e for e in st.session_state.soa_entries if e.get("categoria")]
+            cert_clean = [e for e in st.session_state.cert_entries if e.get("tipo")]
+            minimal_profile = build_from_form(soa_clean, cert_clean, regioni)
 
-        except FileNotFoundError:
-            st.error("⚠️ `config/profilo_azienda.json` non trovato.")
-        except Exception as e:
-            st.error(f"Errore profilo: {e}")
+            st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown("---")
 
-        if st.session_state.get("result"):
-            fname = st.session_state.get("analyzed_file", "bando")
-            st.caption(f"📄 Analizzato: **{fname}**")
+        # Reset
+        if st.session_state.get("card_result"):
             if st.button("🗑️ Nuova analisi", use_container_width=True, type="secondary"):
-                st.session_state.result = None
+                st.session_state.card_result = None
                 st.session_state.analyzed_file = None
                 st.rerun()
 
-        st.markdown("---")
+        # Info
         st.markdown(
-            '<div style="font-size:0.72rem;color:#94a3b8;line-height:1.6">'
-            'BidPilot v3.0 · Libreria Requisiti v2.1<br>'
-            '84 requisiti · 16 regole anti-inferenza<br>'
-            '<code style="font-size:0.68rem">GO · GO_HIGH_RISK · GO_WITH_STRUCTURE · NO_GO</code>'
+            '<div style="font-size:0.7rem;color:#94a3b8;line-height:1.6;margin-top:0.5rem">'
+            'BidPilot MVP · BandoCard<br>'
+            'Evidence-first · ✅❌❓ matching<br>'
+            f'Advanced mode: {"🔓 ON" if ADVANCED_MODE else "🔒 OFF"}'
             '</div>',
             unsafe_allow_html=True
         )
 
+        return minimal_profile
 
-# ══════════════════════════════════════════════════════════
-# Tab Analisi
-# ══════════════════════════════════════════════════════════
 
-def tab_analisi():
+# ══════════════════════════════════════════════════════
+# PIPELINE ANALISI
+# ══════════════════════════════════════════════════════
+
+def run_analysis(pdf_path: str, api_key: str, minimal_profile) -> BandoCard:
+    """Pipeline completa: PDF → BandoCard."""
+    # 1. Parsing (extraction + guardrail)
+    parsed = _parse_pdf(pdf_path, api_key=api_key)
+    analysis = _analyze(parsed)
+    bando = analysis.bando
+
+    # 2. Matching requisiti
+    results = evaluate_all(bando, minimal_profile.company)
+
+    # 3. Salva risultato completo per ADVANCED_MODE
+    if ADVANCED_MODE:
+        st.session_state.full_result = {
+            "bando": bando,
+            "analysis": analysis,
+            "results": results,
+        }
+
+    # 4. Costruisci BandoCard
+    card = build_bando_card(
+        bando=bando,
+        results=results,
+        soa_profile_empty=not minimal_profile.has_soa_data,
+        cert_profile_empty=not minimal_profile.has_cert_data,
+    )
+
+    return card
+
+
+# ══════════════════════════════════════════════════════
+# TAB ANALISI
+# ══════════════════════════════════════════════════════
+
+def tab_analisi(minimal_profile):
     if not st.session_state.get("api_key"):
         st.markdown("""
         <div class="upload-zone">
           <div class="upload-icon">🔑</div>
           <div class="upload-title">API Key richiesta</div>
-          <div class="upload-sub">Inserisci la tua OpenAI API Key nella sidebar per procedere.</div>
+          <div class="upload-sub">Inserisci la tua Anthropic API Key nella sidebar per procedere.</div>
         </div>
         """, unsafe_allow_html=True)
         return
 
-    st.markdown("""
-    <div class="section-header">
-      <div class="section-header-icon">📄</div>
-      <div class="section-header-text">Carica Bando di Gara</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("#### 📄 Carica il PDF del bando")
 
     uploaded = st.file_uploader(
         "Seleziona il PDF del bando",
         type=["pdf"],
-        help="PDF con testo selezionabile (non scansionato). Max 100 pagine.",
-        label_visibility="collapsed"
+        help="PDF con testo selezionabile (non scansionato). Disciplinari, lettere invito, sistemi di qualificazione.",
+        label_visibility="collapsed",
     )
 
     if not uploaded:
         st.markdown("""
         <div class="upload-zone">
           <div class="upload-icon">📂</div>
-          <div class="upload-title">Trascina il PDF o clicca Sfoglia</div>
-          <div class="upload-sub">Supporta disciplinari, lettere invito, sistemi di qualificazione · Max 100 pagine</div>
+          <div class="upload-title">Trascina il PDF qui o clicca Sfoglia</div>
+          <div class="upload-sub">Disciplinari · Lettere invito · Sistemi di qualificazione · Max 100 pagine</div>
         </div>
         """, unsafe_allow_html=True)
         return
@@ -1123,70 +638,60 @@ def tab_analisi():
     if not start:
         return
 
-    error_occurred = False
-    with st.spinner("🤖 Estrazione requisiti in corso… (30–60 secondi)"):
+    error = False
+    with st.spinner("🤖 Estrazione in corso… (30–90 secondi)"):
         os.makedirs("data", exist_ok=True)
         temp_path = f"data/temp_{uploaded.name}"
         try:
             with open(temp_path, "wb") as f:
                 f.write(uploaded.getbuffer())
-            parser = BandoParser()
-            text = parser.parse_pdf(temp_path, mode="full")
-            analyzer = BandoAnalyzer(
-                openai_api_key=st.session_state.api_key,
-                profilo_path="config/profilo_azienda.json"
-            )
-            result = analyzer.analyze_bando(text)
-            st.session_state.result = result
-            st.session_state.analyzed_file = uploaded.name
-        except Exception as e:
-            st.error(f"❌ Errore durante l'analisi: {e}")
-            st.exception(e)
-            error_occurred = True
-        finally:
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
 
-    if not error_occurred and st.session_state.get("result"):
+            card = run_analysis(temp_path, st.session_state.api_key, minimal_profile)
+            st.session_state.card_result = card
+            st.session_state.analyzed_file = uploaded.name
+
+        except Exception as e:
+            st.error(f"❌ Errore: {e}")
+            st.exception(e)
+            error = True
+        finally:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+    if not error and st.session_state.get("card_result"):
         st.success("✅ Analisi completata!")
         st.rerun()
 
 
-# ══════════════════════════════════════════════════════════
-# Main
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════
 
 def main():
-    for key in ("api_key", "result", "analyzed_file"):
+    for key in ("api_key", "card_result", "analyzed_file", "soa_entries", "cert_entries", "regioni"):
         if key not in st.session_state:
-            st.session_state[key] = None
+            if key == "soa_entries":
+                st.session_state[key] = [{"categoria": "", "classifica": "I", "scadenza": ""}]
+            elif key == "cert_entries":
+                st.session_state[key] = [{"tipo": "", "scadenza": ""}]
+            elif key == "regioni":
+                st.session_state[key] = []
+            else:
+                st.session_state[key] = None
 
-    render_header_bar()
-    sidebar()
+    render_header()
+    minimal_profile = sidebar_profile()
 
-    main_tab, drafts_tab = st.tabs(["📊 Analisi Bando", "✍️ Bozze Offerta (WIP)"])
-
-    with main_tab:
-        if st.session_state.result:
-            _render_result(st.session_state.result)
-            st.markdown("---")
-            with st.expander("🔄 Analizza un altro bando"):
-                tab_analisi()
-        else:
-            tab_analisi()
-
-    with drafts_tab:
-        st.markdown("""
-        <div class="upload-zone">
-          <div class="upload-icon">🚧</div>
-          <div class="upload-title">Modulo Bozze Offerta Tecnica</div>
-          <div class="upload-sub">Generazione automatica bozze basate su progetti storici · Previsto in v3.1<br>
-          Inserisci i PDF dei tuoi progetti in <code>data/progetti_storici/</code></div>
-        </div>
-        """, unsafe_allow_html=True)
+    if st.session_state.card_result:
+        st.caption(f"📄 Bando analizzato: **{st.session_state.analyzed_file}**")
+        render_bando_card(st.session_state.card_result)
+        st.markdown("---")
+        with st.expander("🔄 Analizza un altro bando"):
+            tab_analisi(minimal_profile)
+    else:
+        tab_analisi(minimal_profile)
 
 
 if __name__ == "__main__":
