@@ -11,6 +11,7 @@ Principio MVP:
 """
 from __future__ import annotations
 from datetime import date
+import re
 from typing import List, Optional
 
 from src.schemas import (
@@ -154,11 +155,18 @@ def build_from_json(profilo_dict: dict) -> MinimalProfile:
 
     # Fatturato
     from src.schemas import TurnoverEntry
-    turnover = [
-        TurnoverEntry(year=int(year), amount_eur=float(data.get("totale", 0)))
-        for year, data in profilo_dict.get("fatturato", {}).items()
-        if isinstance(data, dict) and data.get("totale")
-    ]
+    turnover = []
+    for raw_year, data in profilo_dict.get("fatturato", {}).items():
+        if not isinstance(data, dict) or not data.get("totale"):
+            continue
+
+        parsed_year = _parse_turnover_year(raw_year)
+        if parsed_year is None:
+            continue
+
+        turnover.append(
+            TurnoverEntry(year=parsed_year, amount_eur=float(data.get("totale", 0)))
+        )
 
     # Opere analoghe
     from src.schemas import SimilarWork
@@ -235,6 +243,23 @@ def build_from_json(profilo_dict: dict) -> MinimalProfile:
         has_cert_data=len(certifications) > 0,
         has_region_data=len(profilo_dict.get("aree_geografiche", [])) > 0,
     )
+
+
+def _parse_turnover_year(raw_year: object) -> Optional[int]:
+    """Estrae l'anno da chiavi fatturato come `2024` o `anno_2024`."""
+    if isinstance(raw_year, int):
+        return raw_year
+
+    if isinstance(raw_year, str):
+        year_str = raw_year.strip()
+        if year_str.isdigit():
+            return int(year_str)
+
+        match = re.search(r"(19|20)\d{2}", year_str)
+        if match:
+            return int(match.group(0))
+
+    return None
 
 
 def _default_expiry() -> str:

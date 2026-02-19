@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from schemas import BandoRequisiti, Scadenza, SOACategoria
+    from src.schemas import BandoRequisiti, Scadenza, SOACategoria
     _HAS_PYDANTIC = True
 except (ImportError, ModuleNotFoundError):
     _HAS_PYDANTIC = False
