@@ -423,17 +423,17 @@ def sidebar_profile():
 
         # API Key
         api_key = st.text_input(
-            "Anthropic API Key",
+            "OpenAI API Key",
             type="password",
             value=st.session_state.get("api_key", ""),
-            placeholder="sk-ant-…",
-            help="Ottieni la key su console.anthropic.com",
+            placeholder="sk-...",
+            help="Ottieni la key su platform.openai.com",
         )
         if api_key:
             st.session_state.api_key = api_key
             st.success("✅ API Key configurata")
         else:
-            st.warning("⚠️ Inserire API Key per procedere")
+            st.warning("⚠️ Inserire OpenAI API Key per procedere")
 
         st.markdown("---")
 
@@ -605,7 +605,7 @@ def tab_analisi(minimal_profile):
         <div class="upload-zone">
           <div class="upload-icon">🔑</div>
           <div class="upload-title">API Key richiesta</div>
-          <div class="upload-sub">Inserisci la tua Anthropic API Key nella sidebar per procedere.</div>
+          <div class="upload-sub">Inserisci la tua OpenAI API Key nella sidebar per procedere.</div>
         </div>
         """, unsafe_allow_html=True)
         return
@@ -652,7 +652,12 @@ def tab_analisi(minimal_profile):
 
         except Exception as e:
             st.error(f"❌ Errore: {e}")
-            st.exception(e)
+            if isinstance(e, RuntimeError) and (
+                "modulo 'anthropic'" in str(e) or "modulo 'openai'" in str(e)
+            ):
+                st.info("Suggerimento: attiva il venv corretto e installa le dipendenze con `pip install -r requirements.txt`.")
+            else:
+                st.exception(e)
             error = True
         finally:
             try:

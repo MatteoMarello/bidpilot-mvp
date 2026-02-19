@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from retrieval import (
+from src.retrieval import (
     Chunk,
     ExtractionTrace,
     Retriever,
@@ -289,17 +289,48 @@ def _build_meta_prompt(context: str) -> str:
 
 def _call_llm(prompt: str, model: str, api_key: str) -> dict:
     """
-    Chiama l'LLM (Anthropic claude-*) e restituisce il JSON estratto.
+    Chiama l'LLM e restituisce il JSON estratto.
+    Supporta Anthropic (modelli claude-*) e OpenAI (fallback/predefinito).
     Raises ValueError se il JSON non è parsabile.
     """
-    import anthropic  # type: ignore
-    client = anthropic.Anthropic(api_key=api_key)
-    message = client.messages.create(
-        model=model,
-        max_tokens=2048,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = message.content[0].text.strip()
+    raw: str
+
+    if model.startswith("claude"):
+        try:
+            import anthropic  # type: ignore
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Modello Claude richiesto ma modulo 'anthropic' non installato. "
+                "Installa `anthropic` o usa un modello OpenAI (es. gpt-4o-mini)."
+            ) from exc
+
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model=model,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text.strip()
+    else:
+        try:
+            from openai import OpenAI  # type: ignore
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Dipendenza mancante: modulo 'openai' non installato. "
+                "Installa i requirements del progetto (es. `pip install -r requirements.txt`)."
+            ) from exc
+
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "Rispondi sempre e solo con JSON valido."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        raw = (response.choices[0].message.content or "").strip()
 
     # Rimuovi eventuali ```json ... ``` se il modello li aggiunge
     raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
@@ -394,7 +425,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 def parse_pdf(
     path: str,
-    model: str = "claude-opus-4-6",
+    model: str = "gpt-4o-mini",
     api_key: Optional[str] = None,
     categories: Optional[List[str]] = None,
     top_n_per_category: int = 6,
@@ -407,16 +438,16 @@ def parse_pdf(
 
     Args:
         path: percorso al file PDF
-        model: modello Anthropic da usare
-        api_key: API key Anthropic (default: legge ANTHROPIC_API_KEY)
+        model: modello LLM da usare (es. gpt-4o-mini o claude-*)
+        api_key: API key provider (default: OPENAI_API_KEY, poi ANTHROPIC_API_KEY)
         categories: lista di categorie da estrarre (default: tutte)
         top_n_per_category: chunk massimi per categoria
         min_score: soglia minima di score per il retrieval
     """
-    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    api_key = api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise ValueError(
-            "API key Anthropic non trovata. Passa api_key= o imposta ANTHROPIC_API_KEY."
+            "API key non trovata. Passa api_key= o imposta OPENAI_API_KEY (o ANTHROPIC_API_KEY)."
         )
 
     path = str(Path(path).resolve())
@@ -470,7 +501,7 @@ def parse_pdf(
 
 def parse_text(
     text: str,
-    model: str = "claude-opus-4-6",
+    model: str = "gpt-4o-mini",
     api_key: Optional[str] = None,
     categories: Optional[List[str]] = None,
     top_n_per_category: int = 6,
@@ -480,9 +511,9 @@ def parse_text(
     Variante: accetta testo già estratto invece di un PDF.
     Usata nei test golden (evita dipendenza da file PDF reali).
     """
-    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    api_key = api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        raise ValueError("API key Anthropic non trovata.")
+        raise ValueError("API key non trovata (OPENAI_API_KEY / ANTHROPIC_API_KEY).")
 
     chunks = chunk_full_text(text)
     retriever = Retriever(chunks)
